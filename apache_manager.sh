@@ -477,6 +477,308 @@ set_backup_immutable() {
 }
 
 # ============================================================
+# FUNCIÓN: Backup con Rsync
+# ============================================================
+rsync_backup() {
+    local SRC="${1}"          # Origen
+    local DEST="${2}"         # Destino (local o user@host:/path)
+    local BACKUP_NAME="${3:-rsync_$(date '+%Y%m%d_%H%M%S')}"
+    local EXTRA_OPTS="${4:-}"  # Opciones adicionales rsync
+
+    check_root
+
+    if [ -z "$SRC" ] || [ -z "$DEST" ]; then
+        echo "ERROR: Se requieren origen y destino"
+        exit 1
+    fi
+
+    # Verificar que rsync está instalado
+    if ! command -v rsync &> /dev/null; then
+        echo "INFO: Instalando rsync..."
+        apt-get install -y rsync > /dev/null 2>&1
+    fi
+
+    mkdir -p "$BACKUP_DIR/rsync_logs"
+
+    local TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+    local LOG_RSYNC="$BACKUP_DIR/rsync_logs/${BACKUP_NAME}_${TIMESTAMP}.log"
+
+    echo "Iniciando Rsync Backup..."
+    echo "ORIGEN:  $SRC"
+    echo "DESTINO: $DEST"
+
+    # Construir comando rsync
+    # -a  = archive (preserva permisos, timestamps, links, etc.)
+    # -v  = verbose
+    # -z  = compresión en tránsito
+    # --progress         = progreso
+    # --delete           = elimina en destino lo que no existe en origen
+    # --backup           = conserva versiones anteriores
+    # --backup-dir       = directorio para versiones antiguas con fecha
+    # --link-dest        = hardlinks para backups incrementales eficientes
+    # --exclude          = excluir patrones
+
+    local BACKUP_VERSIONED="$DEST/.versions/$(date '+%Y-%m-%d_%H%M%S')"
+    local LATEST_LINK="$DEST/.latest"
+
+    # Detectar si es destino remoto (contiene @)
+    if echo "$DEST" | grep -q "@"; then
+        # Destino remoto SSH
+        rsync -avz \
+            --progress \
+            --delete \
+            --backup \
+            --backup-dir="$BACKUP_VERSIONED" \
+            --exclude="*.swp" \
+            --exclude="*.tmp" \
+            --exclude="__pycache__" \
+            --log-file="$LOG_RSYNC" \
+            $EXTRA_OPTS \
+            "$SRC" "$DEST/current/" 2>&1 | tee -a "$LOG_RSYNC"
+    else
+        # Destino local — usa --link-dest para incrementales eficientes
+        mkdir -p "$DEST/current" "$DEST/.versions"
+
+        local PREV_LINK=""
+        if [ -d "$DEST/current" ]; then
+            PREV_LINK="--link-dest=$DEST/current"
+        fi
+
+        rsync -av \
+            --progress \
+            --delete \
+            --backup \
+            --backup-dir="$DEST/.versions/$(date '+%Y-%m-%d_%H%M%S')" \
+            --exclude="*.swp" \
+            --exclude="*.tmp" \
+            --exclude="*.pid" \
+            --exclude="cache/" \
+            --log-file="$LOG_RSYNC" \
+            $EXTRA_OPTS \
+            "$SRC" "$DEST/current/" 2>&1 | tee -a "$LOG_RSYNC"
+    fi
+
+    local EXIT_CODE=$?
+    local TRANSFERRED=$(grep "sent" "$LOG_RSYNC" 2>/dev/null | tail -1)
+
+    if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 23 ]; then
+        # Guardar metadata del rsync
+        cat > "$BACKUP_DIR/rsync_logs/${BACKUP_NAME}_${TIMESTAMP}.meta" << META
+RSYNC_NAME=$BACKUP_NAME
+TIMESTAMP=$TIMESTAMP
+DATE=$(date '+%Y-%m-%d %H:%M:%S')
+SOURCE=$SRC
+DESTINATION=$DEST
+EXIT_CODE=$EXIT_CODE
+LOG=$LOG_RSYNC
+TRANSFERRED=$TRANSFERRED
+META
+        log_action "Rsync completado: $SRC → $DEST"
+        echo "SUCCESS: Rsync backup completado"
+        echo "LOG: $LOG_RSYNC"
+        echo "STATS: $TRANSFERRED"
+    else
+        echo "ERROR: Rsync falló con código $EXIT_CODE"
+        echo "LOG: $LOG_RSYNC"
+        exit 1
+    fi
+}
+
+# ============================================================
+# FUNCIÓN: Programar Backup con Cron
+# ============================================================
+CRON_FILE="/etc/cron.d/apache2_manager_backup"
+CRON_SCRIPT="/usr/local/bin/apache2_backup_cron.sh"
+
+schedule_backup() {
+    local ACTION="$1"   # add | remove | list | run_now | list_jobs
+
+    check_root
+
+    case "$ACTION" in
+        "add")
+            # Parámetros: add <nombre> <minuto> <hora> <dia_mes> <mes> <dia_sem> <tipo> <src> <dest> [rsync|tar]
+            local JOB_NAME="$2"
+            local MINUTE="$3"
+            local HOUR="$4"
+            local DOM="$5"     # day of month
+            local MONTH="$6"
+            local DOW="$7"     # day of week
+            local BTYPE="$8"   # config | vhosts | full | rsync
+            local SRC="$9"
+            local DEST="${10:-$BACKUP_DIR}"
+            local METHOD="${11:-tar}"  # tar | rsync
+
+            if [ -z "$JOB_NAME" ] || [ -z "$MINUTE" ]; then
+                echo "ERROR: Parámetros insuficientes para programar el backup"
+                exit 1
+            fi
+
+            # Crear script ejecutor del cron si no existe
+            _create_cron_runner
+
+            # Construir línea cron
+            local CRON_CMD
+            if [ "$METHOD" = "rsync" ]; then
+                CRON_CMD="bash $CRON_SCRIPT rsync_backup \"$SRC\" \"$DEST\" \"$JOB_NAME\""
+            else
+                CRON_CMD="bash $CRON_SCRIPT create_backup \"$JOB_NAME\" \"$BTYPE\""
+            fi
+
+            # Agregar al archivo cron.d
+            # Formato: minuto hora dia_mes mes dia_semana usuario comando
+            local CRON_LINE="$MINUTE $HOUR $DOM $MONTH $DOW root $CRON_CMD >> /var/log/apache2_backup_cron.log 2>&1"
+
+            # Verificar si ya existe un job con ese nombre
+            if grep -q "# JOB:$JOB_NAME" "$CRON_FILE" 2>/dev/null; then
+                # Remover el anterior
+                sed -i "/# JOB:$JOB_NAME/,+1d" "$CRON_FILE"
+            fi
+
+            # Crear/agregar al archivo cron.d
+            if [ ! -f "$CRON_FILE" ]; then
+                cat > "$CRON_FILE" << CRONHEADER
+# Apache2 Manager - Backup Programado
+# Generado por Apache2 Manager
+# NO EDITAR MANUALMENTE - Use la interfaz gráfica
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+CRONHEADER
+            fi
+
+            # Agregar línea con comentario identificador
+            echo "" >> "$CRON_FILE"
+            echo "# JOB:$JOB_NAME TYPE:$BTYPE METHOD:$METHOD SRC:$SRC DEST:$DEST" >> "$CRON_FILE"
+            echo "$CRON_LINE" >> "$CRON_FILE"
+
+            # Ajustar permisos del archivo cron.d
+            chmod 644 "$CRON_FILE"
+            chown root:root "$CRON_FILE"
+
+            log_action "Backup programado creado: $JOB_NAME ($MINUTE $HOUR $DOM $MONTH $DOW)"
+            echo "SUCCESS: Backup programado '$JOB_NAME'"
+            echo "SCHEDULE: $MINUTE $HOUR $DOM $MONTH $DOW"
+            echo "METHOD: $METHOD"
+            echo "TYPE: $BTYPE"
+            echo "SOURCE: $SRC"
+            echo "DEST: $DEST"
+            ;;
+
+        "remove")
+            local JOB_NAME="$2"
+            if [ -z "$JOB_NAME" ]; then
+                echo "ERROR: Especifique el nombre del job"
+                exit 1
+            fi
+            if [ ! -f "$CRON_FILE" ]; then
+                echo "ERROR: No hay jobs programados"
+                exit 1
+            fi
+            if grep -q "# JOB:$JOB_NAME" "$CRON_FILE"; then
+                sed -i "/^$/N;/# JOB:$JOB_NAME/,+1d" "$CRON_FILE"
+                log_action "Job eliminado: $JOB_NAME"
+                echo "SUCCESS: Job '$JOB_NAME' eliminado"
+            else
+                echo "ERROR: Job '$JOB_NAME' no encontrado"
+                exit 1
+            fi
+            ;;
+
+        "list_jobs")
+            echo "=== JOBS DE BACKUP PROGRAMADOS ==="
+            if [ ! -f "$CRON_FILE" ]; then
+                echo "INFO: No hay jobs programados"
+                exit 0
+            fi
+            local COUNT=0
+            while IFS= read -r line; do
+                if [[ "$line" == "# JOB:"* ]]; then
+                    # Extraer metadatos del comentario
+                    local job_name=$(echo "$line" | grep -oP 'JOB:\K\S+')
+                    local job_type=$(echo "$line" | grep -oP 'TYPE:\K\S+')
+                    local job_method=$(echo "$line" | grep -oP 'METHOD:\K\S+')
+                    local job_src=$(echo "$line" | grep -oP 'SRC:\K\S+')
+                    local job_dest=$(echo "$line" | grep -oP 'DEST:\K\S+')
+                    # Leer la línea siguiente (la del cron real)
+                    IFS= read -r cron_line
+                    # Extraer expresión cron (primeros 5 campos)
+                    local schedule=$(echo "$cron_line" | awk '{print $1,$2,$3,$4,$5}')
+                    COUNT=$((COUNT + 1))
+                    echo "JOB|$job_name|$schedule|$job_type|$job_method|$job_src|$job_dest"
+                fi
+            done < "$CRON_FILE"
+            echo "TOTAL: $COUNT job(s)"
+            ;;
+
+        "run_now")
+            local JOB_NAME="$2"
+            if [ -z "$JOB_NAME" ]; then
+                echo "ERROR: Especifique el nombre del job"
+                exit 1
+            fi
+            if [ ! -f "$CRON_FILE" ]; then
+                echo "ERROR: No hay jobs programados"
+                exit 1
+            fi
+            # Extraer y ejecutar el comando del job
+            local CMD=$(grep -A1 "# JOB:$JOB_NAME" "$CRON_FILE" 2>/dev/null | \
+                        tail -1 | awk '{for(i=6;i<=NF;i++) printf $i" "; print ""}')
+            if [ -z "$CMD" ]; then
+                echo "ERROR: Job '$JOB_NAME' no encontrado"
+                exit 1
+            fi
+            echo "Ejecutando job manualmente: $JOB_NAME"
+            echo "Comando: $CMD"
+            eval "$CMD"
+            ;;
+
+        "list_logs")
+            echo "=== LOGS DE EJECUCIÓN ==="
+            if [ -f "/var/log/apache2_backup_cron.log" ]; then
+                tail -50 /var/log/apache2_backup_cron.log
+            else
+                echo "INFO: Sin registros de ejecución aún"
+            fi
+            ;;
+
+        "view_cron")
+            echo "=== CONTENIDO DE $CRON_FILE ==="
+            if [ -f "$CRON_FILE" ]; then
+                cat "$CRON_FILE"
+            else
+                echo "INFO: Archivo cron no existe"
+            fi
+            ;;
+
+        *)
+            echo "ERROR: Acción desconocida: $ACTION"
+            exit 1
+            ;;
+    esac
+}
+
+_create_cron_runner() {
+    # Script que cron ejecuta directamente (carga el backend)
+    cat > "$CRON_SCRIPT" << RUNNER
+#!/bin/bash
+# Apache2 Manager - Cron Runner
+# Generado automáticamente - No editar
+
+BACKEND="/usr/local/bin/apache_manager.sh"
+# Buscar backend en ubicaciones conocidas
+for path in /opt/apache2_manager/apache_manager.sh /usr/local/bin/apache_manager.sh; do
+    [ -f "\$path" ] && BACKEND="\$path" && break
+done
+
+LOG="/var/log/apache2_backup_cron.log"
+echo "[\\$(date '+%Y-%m-%d %H:%M:%S')] === Cron job ejecutado: \$@ ===" >> "\$LOG"
+bash "\$BACKEND" "\$@" >> "\$LOG" 2>&1
+echo "[\\$(date '+%Y-%m-%d %H:%M:%S')] Finalizado con código: \$?" >> "\$LOG"
+RUNNER
+    chmod +x "$CRON_SCRIPT"
+}
+
+# ============================================================
 # FUNCIÓN: Eliminar VirtualHost
 # ============================================================
 delete_virtualhost() {
@@ -559,6 +861,12 @@ case "$COMMAND" in
                 ;;
         esac
         ;;
+    "rsync_backup")
+        rsync_backup "$@"
+        ;;
+    "schedule_backup")
+        schedule_backup "$@"
+        ;;
     *)
         echo "Uso: $0 <comando> [argumentos]"
         echo ""
@@ -572,6 +880,8 @@ case "$COMMAND" in
         echo "  set_immutable <archivo> [lock|unlock|status]"
         echo "  delete_vhost <dominio> [yes|no]"
         echo "  apache_control <start|stop|restart|reload|status>"
+        echo "  rsync_backup <origen> <destino> [nombre] [opciones_extra]"
+        echo "  schedule_backup <add|remove|list_jobs|run_now|list_logs|view_cron> [args...]"
         exit 1
         ;;
 esac

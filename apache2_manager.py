@@ -1087,16 +1087,18 @@ class Apache2Manager(tk.Tk):
         self.console.pack(fill="x", padx=0, pady=0)
 
         # ── Crear Tabs ──
-        self.tab_vhost  = VHostTab(self.notebook,    self.console)
-        self.tab_config = ConfigTab(self.notebook,   self.console)
-        self.tab_sec    = SecurityTab(self.notebook, self.console)
-        self.tab_backup = BackupTab(self.notebook,   self.console)
+        self.tab_vhost  = VHostTab(self.notebook,     self.console)
+        self.tab_config = ConfigTab(self.notebook,    self.console)
+        self.tab_sec    = SecurityTab(self.notebook,  self.console)
+        self.tab_backup = BackupTab(self.notebook,    self.console)
+        self.tab_cron   = CronRsyncTab(self.notebook, self.console)
 
         tab_defs = [
             (self.tab_vhost,  "  🌐  Virtual Hosts  "),
             (self.tab_config, "  ⚙  Configuración  "),
             (self.tab_sec,    "  🔒  Seguridad      "),
             (self.tab_backup, "  💾  Backups        "),
+            (self.tab_cron,   "  🕐  Cron + Rsync   "),
         ]
         for tab, label in tab_defs:
             self.notebook.add(tab, text=label)
@@ -1161,6 +1163,499 @@ class Apache2Manager(tk.Tk):
         self.console.write(f"  Directorio de trabajo: {SCRIPT_DIR}", "info")
         self.console.write(f"  Backend: {BACKEND_SCRIPT}", "info")
         self.console.write("═══════════════════════════════════════", "dim")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 5: Backup Programado — Rsync + Cron
+# ══════════════════════════════════════════════════════════════
+class CronRsyncTab(tk.Frame):
+    """Tab completo para programar backups con cron.d y rsync"""
+
+    FRECUENCIAS = {
+        "Cada hora":         ("0",  "*",  "*", "*", "*"),
+        "Cada 6 horas":      ("0",  "*/6","*", "*", "*"),
+        "Cada 12 horas":     ("0",  "*/12","*","*", "*"),
+        "Diario (medianoche)":("0", "0",  "*", "*", "*"),
+        "Diario (02:00 AM)": ("0",  "2",  "*", "*", "*"),
+        "Lunes - Semanal":   ("0",  "3",  "*", "*", "1"),
+        "Mensual (día 1)":   ("0",  "4",  "1", "*", "*"),
+        "Personalizado":     ("",   "",   "",  "",  ""),
+    }
+
+    def __init__(self, parent, console):
+        super().__init__(parent, bg=COLORS["bg_dark"])
+        self.console = console
+        self._build()
+
+    def _build(self):
+        # ── Layout: izquierda=formularios, derecha=jobs
+        main = tk.Frame(self, bg=COLORS["bg_dark"])
+        main.pack(fill="both", expand=True, padx=10, pady=10)
+
+        left = tk.Frame(main, bg=COLORS["bg_dark"])
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        right = tk.Frame(main, bg=COLORS["bg_dark"])
+        right.pack(side="right", fill="both", expand=True, padx=(6, 0))
+
+        # ══ PANEL IZQUIERDO ══════════════════════════════════
+
+        # ── Sección Rsync inmediato ──
+        rsync_card = Card(left, "⚡  RSYNC BACKUP INMEDIATO",
+                          accent_color=COLORS["accent"])
+        rsync_card.pack(fill="x", pady=(0, 8))
+
+        rb = tk.Frame(rsync_card, bg=COLORS["bg_card"])
+        rb.pack(fill="x", padx=14, pady=10)
+
+        self.rsync_src  = LabeledEntry(rb, "Origen  (src):",
+                                        "/etc/apache2", 34)
+        self.rsync_dest = LabeledEntry(rb, "Destino (dst):",
+                                        "/var/backups/apache2_manager/rsync", 34)
+        self.rsync_name = LabeledEntry(rb, "Nombre del backup:",
+                                        "rsync_apache", 34)
+
+        for w in [self.rsync_src, self.rsync_dest, self.rsync_name]:
+            w.pack(fill="x", pady=2)
+
+        # Opciones rsync
+        opt_frame = tk.Frame(rb, bg=COLORS["bg_card"])
+        opt_frame.pack(fill="x", pady=(6, 0))
+
+        tk.Label(opt_frame, text="Opciones adicionales rsync:",
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_secondary"]).pack(anchor="w")
+
+        self.rsync_opts_var = tk.StringVar()
+        opts_checks = tk.Frame(opt_frame, bg=COLORS["bg_card"])
+        opts_checks.pack(fill="x")
+
+        self._opt_delete  = tk.BooleanVar(value=True)
+        self._opt_compress = tk.BooleanVar(value=False)
+        self._opt_dryrun  = tk.BooleanVar(value=False)
+        self._opt_verbose = tk.BooleanVar(value=True)
+
+        for text, var in [
+            ("--delete (eliminar huérfanos)", self._opt_delete),
+            ("--compress (SSH remoto)",        self._opt_compress),
+            ("--dry-run (simular)",            self._opt_dryrun),
+            ("--verbose",                      self._opt_verbose),
+        ]:
+            tk.Checkbutton(opts_checks, text=text, variable=var,
+                           bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+                           selectcolor=COLORS["bg_input"],
+                           activebackground=COLORS["bg_card"],
+                           font=FONTS["small"]).pack(
+                side="left", padx=4)
+
+        tk.Frame(rb, bg=COLORS["border"], height=1).pack(
+            fill="x", pady=8)
+
+        rsync_btns = tk.Frame(rb, bg=COLORS["bg_card"])
+        rsync_btns.pack(fill="x")
+        StyledButton(rsync_btns, "Ejecutar Rsync Ahora",
+                     command=self._run_rsync_now,
+                     style="primary", icon="⚡").pack(
+            side="left", padx=(0, 6), ipady=3)
+        StyledButton(rsync_btns, "📁 Explorar Origen",
+                     command=lambda: self._browse(self.rsync_src),
+                     style="ghost").pack(side="left", padx=3)
+        StyledButton(rsync_btns, "📁 Explorar Destino",
+                     command=lambda: self._browse(self.rsync_dest),
+                     style="ghost").pack(side="left", padx=3)
+
+        # ── Sección Programar con Cron ──
+        cron_card = Card(left, "🕐  PROGRAMAR BACKUP (CRON.D)",
+                         accent_color=COLORS["info"])
+        cron_card.pack(fill="both", expand=True)
+
+        cb = tk.Frame(cron_card, bg=COLORS["bg_card"])
+        cb.pack(fill="both", expand=True, padx=14, pady=10)
+
+        # Fila: nombre del job
+        self.cron_name = LabeledEntry(cb, "Nombre del Job:", "backup_diario", 28)
+        self.cron_name.pack(fill="x", pady=2)
+
+        # Frecuencia predefinida
+        freq_row = tk.Frame(cb, bg=COLORS["bg_card"])
+        freq_row.pack(fill="x", pady=(6, 2))
+        tk.Label(freq_row, text="Frecuencia:", font=FONTS["label"],
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"]).pack(
+            side="left", padx=(0, 8))
+
+        self.freq_var = tk.StringVar(value="Diario (02:00 AM)")
+        freq_combo = ttk.Combobox(freq_row, textvariable=self.freq_var,
+                                   values=list(self.FRECUENCIAS.keys()),
+                                   width=22, state="readonly",
+                                   font=FONTS["body"])
+        freq_combo.pack(side="left")
+        freq_combo.bind("<<ComboboxSelected>>", self._on_freq_change)
+
+        # Expresión cron manual (se activa en "Personalizado")
+        cron_expr_frame = tk.Frame(cb, bg=COLORS["bg_card"])
+        cron_expr_frame.pack(fill="x", pady=4)
+
+        tk.Label(cron_expr_frame, text="Expresión cron  [min hora dia mes diasem]:",
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_secondary"]).pack(anchor="w")
+
+        cron_fields = tk.Frame(cron_expr_frame, bg=COLORS["bg_card"])
+        cron_fields.pack(fill="x")
+
+        labels = ["Min", "Hora", "Día/Mes", "Mes", "Día/Sem"]
+        defaults = ["0", "2", "*", "*", "*"]
+        self.cron_fields = []
+        for lbl, default in zip(labels, defaults):
+            col = tk.Frame(cron_fields, bg=COLORS["bg_card"])
+            col.pack(side="left", padx=3)
+            tk.Label(col, text=lbl, font=FONTS["small"],
+                     bg=COLORS["bg_card"], fg=COLORS["text_muted"]).pack()
+            e = tk.Entry(col, width=7, bg=COLORS["bg_input"],
+                         fg=COLORS["text_primary"],
+                         insertbackground=COLORS["accent"],
+                         font=FONTS["mono"], relief="flat", bd=4,
+                         highlightbackground=COLORS["border"],
+                         highlightcolor=COLORS["accent"],
+                         highlightthickness=1)
+            e.insert(0, default)
+            e.pack()
+            self.cron_fields.append(e)
+
+        # Referencia rápida cron
+        ref = tk.Label(cb,
+            text="* = cualquier  */n = cada n  1-5 = rango  1,3,5 = lista",
+            font=FONTS["small"], bg=COLORS["bg_panel"],
+            fg=COLORS["text_muted"])
+        ref.pack(fill="x", ipady=4, ipadx=6, pady=(2, 6))
+
+        # Tipo y método
+        tm_row = tk.Frame(cb, bg=COLORS["bg_card"])
+        tm_row.pack(fill="x", pady=4)
+
+        left_col = tk.Frame(tm_row, bg=COLORS["bg_card"])
+        left_col.pack(side="left", fill="both", expand=True)
+        right_col = tk.Frame(tm_row, bg=COLORS["bg_card"])
+        right_col.pack(side="right", fill="both", expand=True, padx=(10, 0))
+
+        tk.Label(left_col, text="Método:", font=FONTS["label"],
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"]).pack(anchor="w")
+        self.cron_method = tk.StringVar(value="rsync")
+        for text, val in [("Rsync (incremental)", "rsync"), ("Tar.gz (comprimido)", "tar")]:
+            tk.Radiobutton(left_col, text=text, variable=self.cron_method,
+                           value=val, command=self._toggle_cron_method,
+                           bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+                           selectcolor=COLORS["bg_input"],
+                           activebackground=COLORS["bg_card"],
+                           font=FONTS["small"]).pack(anchor="w")
+
+        tk.Label(right_col, text="Tipo (tar):", font=FONTS["label"],
+                 bg=COLORS["bg_card"], fg=COLORS["text_secondary"]).pack(anchor="w")
+        self.cron_type = tk.StringVar(value="config")
+        for text, val in [("Configuración", "config"),
+                           ("VirtualHosts",  "vhosts"),
+                           ("Completo",       "full")]:
+            tk.Radiobutton(right_col, text=text, variable=self.cron_type,
+                           value=val, bg=COLORS["bg_card"],
+                           fg=COLORS["text_muted"],
+                           selectcolor=COLORS["bg_input"],
+                           activebackground=COLORS["bg_card"],
+                           font=FONTS["small"],
+                           state="disabled").pack(anchor="w")
+        self._tar_radios = right_col.winfo_children()[1:]  # los radiobuttons
+
+        # Origen/Destino para cron rsync
+        self.cron_src  = LabeledEntry(cb, "Origen (cron rsync):",
+                                       "/etc/apache2", 34)
+        self.cron_dest = LabeledEntry(cb, "Destino (cron rsync):",
+                                       "/var/backups/apache2_manager/rsync", 34)
+        self.cron_src.pack(fill="x", pady=2)
+        self.cron_dest.pack(fill="x", pady=2)
+
+        tk.Frame(cb, bg=COLORS["border"], height=1).pack(fill="x", pady=8)
+
+        cron_btns = tk.Frame(cb, bg=COLORS["bg_card"])
+        cron_btns.pack(fill="x")
+        StyledButton(cron_btns, "➕ Agregar Job",
+                     command=self._add_cron_job,
+                     style="success", icon="").pack(side="left", padx=(0, 6))
+        StyledButton(cron_btns, "Ver cron.d",
+                     command=self._view_cron_file,
+                     style="ghost").pack(side="left", padx=3)
+
+        # Previsualización de expresión
+        self.preview_var = tk.StringVar(value="")
+        tk.Label(cb, textvariable=self.preview_var, font=FONTS["small"],
+                 bg=COLORS["bg_card"], fg=COLORS["accent"]).pack(
+            anchor="w", pady=(4, 0))
+
+        for f in self.cron_fields:
+            f.bind("<KeyRelease>", lambda e: self._update_preview())
+        self._on_freq_change()
+
+        # ══ PANEL DERECHO ═════════════════════════════════════
+
+        # ── Lista de jobs programados ──
+        jobs_card = Card(right, "📋  JOBS PROGRAMADOS",
+                         accent_color=COLORS["success"])
+        jobs_card.pack(fill="both", expand=True, pady=(0, 8))
+
+        jb = tk.Frame(jobs_card, bg=COLORS["bg_card"])
+        jb.pack(fill="both", expand=True, padx=5, pady=5)
+
+        j_toolbar = tk.Frame(jb, bg=COLORS["bg_card"])
+        j_toolbar.pack(fill="x", pady=(0, 5))
+        StyledButton(j_toolbar, "↻ Actualizar",
+                     command=self._refresh_jobs,
+                     style="info").pack(side="left", padx=2)
+        StyledButton(j_toolbar, "▶ Ejecutar Ya",
+                     command=self._run_selected_now,
+                     style="success").pack(side="left", padx=2)
+        StyledButton(j_toolbar, "🗑 Eliminar",
+                     command=self._remove_job,
+                     style="danger").pack(side="left", padx=2)
+
+        j_cols = ("Job", "Schedule", "Método", "Tipo")
+        self.jtree = ttk.Treeview(jb, columns=j_cols,
+                                   show="headings", height=8)
+        j_widths = [140, 130, 80, 80]
+        for col, w in zip(j_cols, j_widths):
+            self.jtree.heading(col, text=col)
+            self.jtree.column(col, width=w, anchor="center")
+
+        jscroll = ttk.Scrollbar(jb, orient="vertical",
+                                 command=self.jtree.yview)
+        self.jtree.configure(yscrollcommand=jscroll.set)
+        self.jtree.pack(side="left", fill="both", expand=True)
+        jscroll.pack(side="right", fill="y")
+
+        # ── Logs de ejecución ──
+        log_card = Card(right, "📄  LOG DE EJECUCIONES",
+                        accent_color=COLORS["text_muted"])
+        log_card.pack(fill="both", expand=True)
+
+        log_tb = tk.Frame(log_card, bg=COLORS["bg_card"])
+        log_tb.pack(fill="x", padx=5, pady=3)
+        StyledButton(log_tb, "↻ Ver Logs",
+                     command=self._refresh_logs,
+                     style="ghost").pack(side="left", padx=2)
+        StyledButton(log_tb, "Limpiar Vista",
+                     command=lambda: (self.log_text.config(state="normal"),
+                                      self.log_text.delete("1.0", "end"),
+                                      self.log_text.config(state="disabled")),
+                     style="dark").pack(side="left", padx=2)
+
+        self.log_text = scrolledtext.ScrolledText(
+            log_card, height=9, bg="#0A0E13",
+            fg=COLORS["text_secondary"], font=("Courier New", 9),
+            relief="flat", bd=0, state="disabled"
+        )
+        self.log_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.log_text.tag_config("ok",  foreground=COLORS["success_light"])
+        self.log_text.tag_config("err", foreground=COLORS["danger_light"])
+        self.log_text.tag_config("hdr", foreground=COLORS["accent"])
+
+        self._refresh_jobs()
+
+    # ── helpers ─────────────────────────────────────────────
+    def _browse(self, entry_widget):
+        path = filedialog.askdirectory(title="Seleccionar directorio")
+        if path:
+            entry_widget.set(path)
+
+    def _on_freq_change(self, event=None):
+        key = self.freq_var.get()
+        values = self.FRECUENCIAS.get(key, ("", "", "", "", ""))
+        for field, val in zip(self.cron_fields, values):
+            field.delete(0, "end")
+            field.insert(0, val)
+            state = "normal" if key == "Personalizado" else "readonly"
+            field.config(state=state,
+                          fg=COLORS["text_primary"] if key == "Personalizado"
+                          else COLORS["text_muted"])
+        self._update_preview()
+
+    def _update_preview(self):
+        vals = [f.get() for f in self.cron_fields]
+        expr = " ".join(vals)
+        self.preview_var.set(f"  → Expresión cron: {expr}")
+
+    def _toggle_cron_method(self):
+        method = self.cron_method.get()
+        # Habilitar/deshabilitar radios de tipo tar
+        for rb in self._tar_radios:
+            rb.config(state="normal" if method == "tar" else "disabled",
+                      fg=COLORS["text_primary"] if method == "tar"
+                      else COLORS["text_muted"])
+        # Mostrar/ocultar campos src/dest
+        state = "normal" if method == "rsync" else "disabled"
+        self.cron_src.entry.config(state=state)
+        self.cron_dest.entry.config(state=state)
+
+    def _build_rsync_opts(self):
+        opts = []
+        if self._opt_delete.get():   opts.append("--delete")
+        if self._opt_compress.get(): opts.append("--compress")
+        if self._opt_dryrun.get():   opts.append("--dry-run")
+        if self._opt_verbose.get():  opts.append("--verbose")
+        return " ".join(opts)
+
+    # ── Acciones ────────────────────────────────────────────
+    def _run_rsync_now(self):
+        src  = self.rsync_src.get().strip()
+        dest = self.rsync_dest.get().strip()
+        name = self.rsync_name.get().strip() or "rsync_manual"
+        opts = self._build_rsync_opts()
+
+        if not src or not dest:
+            messagebox.showwarning("Validación", "Origen y Destino son requeridos")
+            return
+
+        self.console.write(f"Rsync: {src} → {dest}", "info")
+
+        def task():
+            args = ["rsync_backup", src, dest, name, opts]
+            out, err, code = run_command_args(args, timeout=120)
+            self.after(0, lambda: self.console.write_output(out, err, code))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _add_cron_job(self):
+        name   = self.cron_name.get().strip()
+        method = self.cron_method.get()
+        btype  = self.cron_type.get()
+        src    = self.cron_src.get().strip()
+        dest   = self.cron_dest.get().strip()
+
+        if not name:
+            messagebox.showwarning("Validación", "Nombre del job es requerido")
+            return
+
+        min_v, hr_v, dom_v, mon_v, dow_v = [f.get().strip()
+                                               for f in self.cron_fields]
+        if not all([min_v, hr_v, dom_v, mon_v, dow_v]):
+            messagebox.showwarning("Validación", "Complete la expresión cron")
+            return
+
+        if method == "rsync" and (not src or not dest):
+            messagebox.showwarning("Validación",
+                                   "Origen y Destino son requeridos para rsync")
+            return
+
+        self.console.write(f"Programando job: {name} ({min_v} {hr_v} {dom_v} {mon_v} {dow_v})", "info")
+
+        def task():
+            args = [
+                "schedule_backup", "add",
+                name, min_v, hr_v, dom_v, mon_v, dow_v,
+                btype, src if method == "rsync" else "",
+                dest if method == "rsync" else "",
+                method
+            ]
+            out, err, code = run_command_args(args)
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._refresh_jobs()
+            ))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _refresh_jobs(self):
+        for item in self.jtree.get_children():
+            self.jtree.delete(item)
+
+        def task():
+            out, err, code = run_command_args(["schedule_backup", "list_jobs"])
+            self.after(0, lambda: self._populate_jobs(out))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _populate_jobs(self, output):
+        for line in output.splitlines():
+            if line.startswith("JOB|"):
+                parts = line.split("|")
+                if len(parts) >= 5:
+                    _, name, schedule, btype, method = parts[:5]
+                    tag = "rsync" if method == "rsync" else "tar"
+                    self.jtree.insert("", "end",
+                                       values=(name, schedule, method, btype),
+                                       tags=(tag,))
+
+        self.jtree.tag_configure("rsync", foreground=COLORS["accent"])
+        self.jtree.tag_configure("tar",   foreground=COLORS["info_light"])
+
+    def _get_selected_job(self):
+        sel = self.jtree.selection()
+        if not sel:
+            messagebox.showwarning("Aviso", "Seleccione un job de la lista")
+            return None
+        return self.jtree.item(sel[0])["values"][0]
+
+    def _run_selected_now(self):
+        name = self._get_selected_job()
+        if not name:
+            return
+        self.console.write(f"Ejecutando job manualmente: {name}", "info")
+
+        def task():
+            out, err, code = run_command_args(
+                ["schedule_backup", "run_now", name], timeout=120)
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._refresh_logs()
+            ))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _remove_job(self):
+        name = self._get_selected_job()
+        if not name:
+            return
+        if not messagebox.askyesno("Confirmar",
+                                    f"¿Eliminar job programado '{name}'?"):
+            return
+        out, err, code = run_command_args(
+            ["schedule_backup", "remove", name])
+        self.console.write_output(out, err, code)
+        self._refresh_jobs()
+
+    def _view_cron_file(self):
+        out, err, code = run_command_args(
+            ["schedule_backup", "view_cron"])
+        # Mostrar en ventana modal
+        win = tk.Toplevel(self)
+        win.title("Contenido de /etc/cron.d/apache2_manager_backup")
+        win.geometry("760x400")
+        win.configure(bg=COLORS["bg_dark"])
+        txt = scrolledtext.ScrolledText(
+            win, bg="#0A0E13", fg=COLORS["success_light"],
+            font=("Courier New", 10), relief="flat"
+        )
+        txt.pack(fill="both", expand=True, padx=8, pady=8)
+        txt.insert("end", out if out else "(vacío o sin permisos)")
+        txt.config(state="disabled")
+
+    def _refresh_logs(self):
+        def task():
+            out, err, code = run_command_args(
+                ["schedule_backup", "list_logs"])
+            self.after(0, lambda: self._render_logs(out))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _render_logs(self, output):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        for line in output.splitlines():
+            if "===" in line:
+                self.log_text.insert("end", line + "\n", "hdr")
+            elif "SUCCESS" in line or "completado" in line.lower():
+                self.log_text.insert("end", line + "\n", "ok")
+            elif "ERROR" in line or "falló" in line.lower():
+                self.log_text.insert("end", line + "\n", "err")
+            else:
+                self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
 
 
 # ══════════════════════════════════════════════════════════════
