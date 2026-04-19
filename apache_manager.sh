@@ -137,8 +137,51 @@ read_config() {
             else
                 echo "STATUS: INACTIVO"
             fi
-            echo "VERSION: $(apache2 -v 2>/dev/null | head -1)"
+            echo "VERSION_BINARIO: $(apache2 -v 2>/dev/null | head -1)"
             echo "UPTIME: $(systemctl show apache2 --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)"
+            echo ""
+            echo "=== CONFIGURACIÓN DE VERSIÓN HTTP ==="
+            # Leer ServerTokens real (prioridad: security.conf > apache2.conf > default)
+            local _tokens=""
+            local _sig=""
+            local _tokens_src="(default del sistema)"
+            local _sig_src="(default del sistema)"
+            if [ -f "$SECURITY_CONF" ]; then
+                _t=$(grep "^ServerTokens" "$SECURITY_CONF" 2>/dev/null | awk '{print $2}')
+                _s=$(grep "^ServerSignature" "$SECURITY_CONF" 2>/dev/null | awk '{print $2}')
+                [ -n "$_t" ] && _tokens="$_t" && _tokens_src="security.conf"
+                [ -n "$_s" ] && _sig="$_s"    && _sig_src="security.conf"
+            fi
+            if [ -z "$_tokens" ]; then
+                _t=$(grep "^ServerTokens" "$APACHE_CONF/apache2.conf" 2>/dev/null | awk '{print $2}')
+                [ -n "$_t" ] && _tokens="$_t" && _tokens_src="apache2.conf"
+            fi
+            if [ -z "$_sig" ]; then
+                _s=$(grep "^ServerSignature" "$APACHE_CONF/apache2.conf" 2>/dev/null | awk '{print $2}')
+                [ -n "$_s" ] && _sig="$_s" && _sig_src="apache2.conf"
+            fi
+            _tokens="${_tokens:-OS}"
+            _sig="${_sig:-On}"
+            echo "ServerTokens: $_tokens  [$_tokens_src]"
+            echo "ServerSignature: $_sig  [$_sig_src]"
+            if [ "$_tokens" = "Prod" ]; then
+                echo "VERSION_HTTP: OCULTA  (solo 'Apache' en cabeceras)"
+            else
+                echo "VERSION_HTTP: EXPUESTA  (modo: $_tokens)"
+            fi
+            echo ""
+            echo "=== CABECERA HTTP REAL ==="
+            # Consultar cabecera Server real si curl está disponible
+            if command -v curl &>/dev/null; then
+                local _server_hdr=$(curl -sI --max-time 3 http://localhost/ 2>/dev/null | grep -i "^Server:" | tr -d '\r')
+                if [ -n "$_server_hdr" ]; then
+                    echo "Server Header: $_server_hdr"
+                else
+                    echo "Server Header: (sin respuesta de localhost)"
+                fi
+            else
+                echo "Server Header: (instale curl para verificar)"
+            fi
             ;;
         "virtualhosts")
             echo "=== VIRTUAL HOSTS CONFIGURADOS ==="
@@ -472,6 +515,247 @@ set_backup_immutable() {
             else
                 echo "IMMUTABLE: no"
             fi
+            ;;
+    esac
+}
+
+# ============================================================
+# FUNCIÓN: Gestión de Autenticación Básica en VirtualHost
+# ============================================================
+manage_basic_auth() {
+    local ACTION="$1"      # add | remove | add_user | del_user | list_users | status
+    local DOMAIN="$2"
+    local AUTH_DIR="${3:-/}"       # Directorio a proteger dentro del VHost
+    local USERNAME="$4"
+    local PASSWORD="$5"
+
+    check_root
+
+    local CONF="$SITES_AVAILABLE/$DOMAIN.conf"
+    local HTPASSWD_DIR="/etc/apache2/.htpasswd"
+    local HTPASSWD_FILE="$HTPASSWD_DIR/$DOMAIN.htpasswd"
+
+    if [ -z "$DOMAIN" ]; then
+        echo "ERROR: Dominio requerido"
+        exit 1
+    fi
+
+    case "$ACTION" in
+        "add")
+            # Habilitar autenticación básica en el .conf del VirtualHost
+            if [ ! -f "$CONF" ]; then
+                echo "ERROR: VirtualHost '$DOMAIN' no encontrado en $CONF"
+                exit 1
+            fi
+
+            # Verificar que apache2-utils está instalado (provee htpasswd)
+            if ! command -v htpasswd &>/dev/null; then
+                echo "INFO: Instalando apache2-utils..."
+                apt-get install -y apache2-utils > /dev/null 2>&1
+            fi
+
+            mkdir -p "$HTPASSWD_DIR"
+            chmod 750 "$HTPASSWD_DIR"
+
+            # Crear archivo htpasswd si no existe
+            if [ ! -f "$HTPASSWD_FILE" ]; then
+                touch "$HTPASSWD_FILE"
+                chmod 640 "$HTPASSWD_FILE"
+                chown root:www-data "$HTPASSWD_FILE"
+                echo "INFO: Archivo htpasswd creado: $HTPASSWD_FILE"
+            fi
+
+            # Obtener DocumentRoot del VHost
+            local DOCROOT=$(grep -i "DocumentRoot" "$CONF" | awk '{print $2}')
+            local AUTH_PATH="$DOCROOT$AUTH_DIR"
+            [ "$AUTH_DIR" = "/" ] && AUTH_PATH="$DOCROOT"
+
+            # Detectar si ya existe bloque de autenticación en el conf
+            if grep -q "AuthType Basic" "$CONF"; then
+                echo "INFO: Autenticación básica ya configurada en $DOMAIN"
+                echo "INFO: Use 'add_user' para agregar usuarios"
+                exit 0
+            fi
+
+            # Inyectar directiva AuthType Basic en el bloque <Directory>
+            # Buscamos el bloque <Directory DocRoot> y le agregamos auth
+            python3 - "$CONF" "$DOCROOT" "$HTPASSWD_FILE" "$AUTH_DIR" << 'PYEOF'
+import sys, re
+
+conf_file = sys.argv[1]
+docroot   = sys.argv[2]
+htpasswd  = sys.argv[3]
+auth_dir  = sys.argv[4].rstrip("/") or "/"
+
+with open(conf_file) as f:
+    content = f.read()
+
+auth_block = f"""
+    # --- Autenticación Básica (Apache2 Manager) ---
+    <Directory "{docroot}{'' if auth_dir == '/' else auth_dir}">
+        AuthType Basic
+        AuthName "Área Restringida - {docroot.split('/')[-1]}"
+        AuthUserFile {htpasswd}
+        Require valid-user
+        # Heredar AllowOverride
+        AllowOverride AuthConfig
+    </Directory>
+    # --- Fin Autenticación Básica ---"""
+
+# Insertar justo antes de </VirtualHost>
+content = re.sub(
+    r'(</VirtualHost>)',
+    auth_block + r'\n\1',
+    content, count=1
+)
+
+with open(conf_file, 'w') as f:
+    f.write(content)
+
+print("PYOK")
+PYEOF
+
+            if [ $? -ne 0 ]; then
+                echo "ERROR: No se pudo modificar el archivo de configuración"
+                exit 1
+            fi
+
+            # Habilitar módulo auth_basic
+            a2enmod auth_basic authn_file > /dev/null 2>&1
+
+            # Verificar y recargar
+            if apache2ctl configtest > /dev/null 2>&1; then
+                systemctl reload apache2 > /dev/null 2>&1
+                log_action "Autenticación básica ACTIVADA en $DOMAIN (dir: $AUTH_DIR)"
+                echo "SUCCESS: Autenticación básica configurada en '$DOMAIN'"
+                echo "HTPASSWD: $HTPASSWD_FILE"
+                echo "INFO: Agregue usuarios con: manage_basic_auth add_user $DOMAIN <usuario> <contraseña>"
+            else
+                echo "ERROR: Configuración inválida. Revise $CONF"
+                exit 1
+            fi
+            ;;
+
+        "remove")
+            if [ ! -f "$CONF" ]; then
+                echo "ERROR: VirtualHost '$DOMAIN' no encontrado"
+                exit 1
+            fi
+
+            # Eliminar bloque de autenticación básica del .conf
+            python3 - "$CONF" << 'PYEOF'
+import sys, re
+conf_file = sys.argv[1]
+with open(conf_file) as f:
+    content = f.read()
+
+# Eliminar el bloque inyectado entre los comentarios marcadores
+content = re.sub(
+    r'\n\s*# --- Autenticación Básica.*?# --- Fin Autenticación Básica ---\n',
+    '\n',
+    content, flags=re.DOTALL
+)
+with open(conf_file, 'w') as f:
+    f.write(content)
+print("PYOK")
+PYEOF
+
+            if apache2ctl configtest > /dev/null 2>&1; then
+                systemctl reload apache2 > /dev/null 2>&1
+                log_action "Autenticación básica ELIMINADA de $DOMAIN"
+                echo "SUCCESS: Autenticación básica eliminada de '$DOMAIN'"
+                echo "INFO: El archivo htpasswd NO fue eliminado: $HTPASSWD_FILE"
+            else
+                echo "ERROR: Configuración inválida tras eliminar auth"
+                exit 1
+            fi
+            ;;
+
+        "add_user")
+            if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+                echo "ERROR: Usuario y contraseña son requeridos"
+                exit 1
+            fi
+            mkdir -p "$HTPASSWD_DIR"
+
+            if [ ! -f "$HTPASSWD_FILE" ]; then
+                htpasswd -cb "$HTPASSWD_FILE" "$USERNAME" "$PASSWORD" 2>/dev/null
+            else
+                htpasswd -b "$HTPASSWD_FILE" "$USERNAME" "$PASSWORD" 2>/dev/null
+            fi
+
+            if [ $? -eq 0 ]; then
+                chown root:www-data "$HTPASSWD_FILE"
+                chmod 640 "$HTPASSWD_FILE"
+                log_action "Usuario '$USERNAME' agregado a $DOMAIN"
+                echo "SUCCESS: Usuario '$USERNAME' agregado en $DOMAIN"
+                echo "HTPASSWD: $HTPASSWD_FILE"
+            else
+                echo "ERROR: Fallo al agregar usuario"
+                exit 1
+            fi
+            ;;
+
+        "del_user")
+            if [ -z "$USERNAME" ]; then
+                echo "ERROR: Usuario requerido"
+                exit 1
+            fi
+            if [ ! -f "$HTPASSWD_FILE" ]; then
+                echo "ERROR: No existe archivo htpasswd para $DOMAIN"
+                exit 1
+            fi
+            htpasswd -D "$HTPASSWD_FILE" "$USERNAME" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                log_action "Usuario '$USERNAME' eliminado de $DOMAIN"
+                echo "SUCCESS: Usuario '$USERNAME' eliminado"
+            else
+                echo "ERROR: No se pudo eliminar el usuario (¿existe?)"
+                exit 1
+            fi
+            ;;
+
+        "list_users")
+            echo "=== USUARIOS HTPASSWD: $DOMAIN ==="
+            echo "ARCHIVO: $HTPASSWD_FILE"
+            if [ -f "$HTPASSWD_FILE" ]; then
+                local COUNT=0
+                while IFS=: read -r user _; do
+                    [ -n "$user" ] && echo "USER|$user" && COUNT=$((COUNT+1))
+                done < "$HTPASSWD_FILE"
+                echo "TOTAL: $COUNT usuario(s)"
+            else
+                echo "INFO: Sin usuarios configurados (htpasswd no existe)"
+            fi
+            ;;
+
+        "status")
+            echo "=== ESTADO AUTH BÁSICA: $DOMAIN ==="
+            if [ ! -f "$CONF" ]; then
+                echo "AUTH: VirtualHost no encontrado"
+                exit 1
+            fi
+            if grep -q "AuthType Basic" "$CONF"; then
+                echo "AUTH: ACTIVA"
+                local auth_name=$(grep "AuthName" "$CONF" | head -1 | sed 's/.*AuthName\s*//' | tr -d '"')
+                local auth_file=$(grep "AuthUserFile" "$CONF" | head -1 | awk '{print $2}')
+                echo "AuthName: $auth_name"
+                echo "AuthUserFile: $auth_file"
+                # Contar usuarios
+                if [ -f "${auth_file:-$HTPASSWD_FILE}" ]; then
+                    local USERS=$(grep -c "." "${auth_file:-$HTPASSWD_FILE}" 2>/dev/null || echo 0)
+                    echo "USUARIOS: $USERS registrado(s)"
+                else
+                    echo "USUARIOS: Sin archivo htpasswd aún"
+                fi
+            else
+                echo "AUTH: INACTIVA"
+            fi
+            ;;
+
+        *)
+            echo "ERROR: Acción desconocida: $ACTION"
+            exit 1
             ;;
     esac
 }
@@ -866,6 +1150,9 @@ case "$COMMAND" in
         ;;
     "schedule_backup")
         schedule_backup "$@"
+        ;;
+    "basic_auth")
+        manage_basic_auth "$@"
         ;;
     *)
         echo "Uso: $0 <comando> [argumentos]"

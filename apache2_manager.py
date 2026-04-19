@@ -262,6 +262,56 @@ class ConsolePanel(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════════
+# WIDGET: Frame con scroll vertical (para tabs con mucho contenido)
+# ══════════════════════════════════════════════════════════════
+class ScrollableFrame(tk.Frame):
+    """Wrapper que envuelve cualquier contenido en un Canvas scrolleable."""
+    def __init__(self, parent, bg=None, **kwargs):
+        bg = bg or COLORS["bg_dark"]
+        super().__init__(parent, bg=bg, **kwargs)
+
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0)
+        self._vbar   = ttk.Scrollbar(self, orient="vertical",
+                                      command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vbar.set)
+
+        self._vbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+
+        self.inner = tk.Frame(self._canvas, bg=bg)
+        self._win  = self._canvas.create_window((0, 0),
+                                                 window=self.inner,
+                                                 anchor="nw")
+
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Scroll con rueda del ratón
+        for widget in (self._canvas, self.inner):
+            widget.bind("<MouseWheel>",
+                lambda e: self._canvas.yview_scroll(-1*(e.delta//120), "units"))
+            widget.bind("<Button-4>",
+                lambda e: self._canvas.yview_scroll(-1, "units"))
+            widget.bind("<Button-5>",
+                lambda e: self._canvas.yview_scroll(1, "units"))
+
+    def _on_inner_configure(self, _):
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_configure(self, e):
+        self._canvas.itemconfig(self._win, width=e.width)
+
+    def bind_scroll_to(self, widget):
+        """Propaga el scroll de un widget hijo al canvas."""
+        widget.bind("<MouseWheel>",
+            lambda e: self._canvas.yview_scroll(-1*(e.delta//120), "units"))
+        widget.bind("<Button-4>",
+            lambda e: self._canvas.yview_scroll(-1, "units"))
+        widget.bind("<Button-5>",
+            lambda e: self._canvas.yview_scroll(1, "units"))
+
+
+# ══════════════════════════════════════════════════════════════
 # TAB 1: Virtual Hosts
 # ══════════════════════════════════════════════════════════════
 class VHostTab(tk.Frame):
@@ -271,68 +321,53 @@ class VHostTab(tk.Frame):
         self._build()
 
     def _build(self):
-        # Split: form + list
         paned = tk.PanedWindow(self, orient="horizontal",
-                                bg=COLORS["bg_dark"], sashwidth=4,
+                                bg=COLORS["bg_dark"], sashwidth=5,
                                 sashrelief="flat")
         paned.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # ── Formulario Crear VHost ──
-        form_card = Card(self, "➕  CREAR VIRTUAL HOST",
-                         accent_color=COLORS["accent"])
-        paned.add(form_card, minsize=350)
+        # ══ COLUMNA IZQUIERDA: formulario con scroll ══════════
+        form_outer = tk.Frame(paned, bg=COLORS["bg_dark"])
+        paned.add(form_outer, minsize=380)
 
-        body = tk.Frame(form_card, bg=COLORS["bg_card"])
-        body.pack(fill="both", expand=True, padx=15, pady=10)
+        # Canvas + scrollbar para la columna izquierda completa
+        form_canvas = tk.Canvas(form_outer, bg=COLORS["bg_dark"],
+                                 highlightthickness=0)
+        form_scroll = ttk.Scrollbar(form_outer, orient="vertical",
+                                     command=form_canvas.yview)
+        form_canvas.configure(yscrollcommand=form_scroll.set)
+        form_scroll.pack(side="right", fill="y")
+        form_canvas.pack(side="left", fill="both", expand=True)
 
-        self.f_domain   = LabeledEntry(body, "Dominio *",    "ejemplo.local", 28)
-        self.f_docroot  = LabeledEntry(body, "DocumentRoot *","/var/www/ejemplo", 28)
-        self.f_email    = LabeledEntry(body, "Admin Email",  "admin@ejemplo.local", 28)
-        self.f_port     = LabeledEntry(body, "Puerto",       "80", 10)
+        # Frame interior scrolleable
+        self._form_inner = tk.Frame(form_canvas, bg=COLORS["bg_dark"])
+        self._form_win = form_canvas.create_window(
+            (0, 0), window=self._form_inner, anchor="nw")
 
-        for w in [self.f_domain, self.f_docroot, self.f_email, self.f_port]:
-            w.pack(fill="x", pady=3)
+        def _on_form_configure(e):
+            form_canvas.configure(scrollregion=form_canvas.bbox("all"))
+        def _on_canvas_resize(e):
+            form_canvas.itemconfig(self._form_win, width=e.width)
 
-        # Botón para seleccionar directorio
-        dir_frame = tk.Frame(body, bg=COLORS["bg_card"])
-        dir_frame.pack(fill="x", pady=2)
-        StyledButton(dir_frame, "Seleccionar Directorio",
-                     command=self._browse_dir,
-                     style="ghost", icon="📁").pack(side="left")
+        self._form_inner.bind("<Configure>", _on_form_configure)
+        form_canvas.bind("<Configure>", _on_canvas_resize)
+        form_canvas.bind("<MouseWheel>",
+            lambda e: form_canvas.yview_scroll(-1*(e.delta//120), "units"))
+        form_canvas.bind("<Button-4>",
+            lambda e: form_canvas.yview_scroll(-1, "units"))
+        form_canvas.bind("<Button-5>",
+            lambda e: form_canvas.yview_scroll(1, "units"))
 
-        tk.Frame(body, bg=COLORS["border"], height=1).pack(
-            fill="x", pady=10)
+        self._build_form(self._form_inner)
 
-        # Botones
-        btn_frame = tk.Frame(body, bg=COLORS["bg_card"])
-        btn_frame.pack(fill="x")
-        StyledButton(btn_frame, "Crear VirtualHost",
-                     command=self._create_vhost,
-                     style="primary", icon="🚀").pack(
-            side="left", padx=(0, 8))
-        StyledButton(btn_frame, "Limpiar",
-                     command=self._clear_form,
-                     style="ghost", icon="🗑").pack(side="left")
-
-        # Info box
-        info = tk.Frame(body, bg=COLORS["bg_panel"],
-                        highlightbackground=COLORS["info"],
-                        highlightthickness=1)
-        info.pack(fill="x", pady=(15, 0))
-        tk.Label(info, text="ℹ  El VirtualHost será habilitado\n    automáticamente en Apache",
-                 font=FONTS["small"], bg=COLORS["bg_panel"],
-                 fg=COLORS["info_light"], justify="left").pack(
-            padx=10, pady=8, anchor="w")
-
-        # ── Lista de VHosts ──
-        list_card = Card(self, "📋  VIRTUAL HOSTS ACTIVOS",
+        # ══ COLUMNA DERECHA: lista de VHosts ══════════════════
+        list_card = Card(paned, "📋  VIRTUAL HOSTS ACTIVOS",
                          accent_color=COLORS["info"])
         paned.add(list_card, minsize=350)
 
         list_body = tk.Frame(list_card, bg=COLORS["bg_card"])
         list_body.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Toolbar
         toolbar = tk.Frame(list_body, bg=COLORS["bg_card"])
         toolbar.pack(fill="x", pady=(0, 5))
         StyledButton(toolbar, "Actualizar",
@@ -341,12 +376,14 @@ class VHostTab(tk.Frame):
         StyledButton(toolbar, "Eliminar",
                      command=self._delete_vhost,
                      style="danger", icon="🗑").pack(side="left", padx=2)
+        StyledButton(toolbar, "Auth Básica →",
+                     command=self._load_auth_for_selected,
+                     style="warning", icon="🔑").pack(side="left", padx=2)
 
-        # Treeview
-        cols = ("Dominio", "DocumentRoot", "Puerto", "Estado")
+        cols = ("Dominio", "DocRoot", "Puerto", "Estado", "Auth")
         self.tree = ttk.Treeview(list_body, columns=cols,
-                                  show="headings", height=12)
-        widths = [140, 160, 60, 90]
+                                  show="headings", height=10)
+        widths = [130, 140, 55, 90, 60]
         for col, w in zip(cols, widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="center")
@@ -354,13 +391,158 @@ class VHostTab(tk.Frame):
         scroll_y = ttk.Scrollbar(list_body, orient="vertical",
                                   command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll_y.set)
-
         self.tree.pack(side="left", fill="both", expand=True)
         scroll_y.pack(side="right", fill="y")
 
         self._style_tree()
         self._refresh_list()
 
+    # ─── Formulario principal (dentro del canvas scroll) ─────
+    def _build_form(self, parent):
+        # ── Sección: Datos básicos ──
+        basic_card = Card(parent, "➕  CREAR VIRTUAL HOST",
+                          accent_color=COLORS["accent"])
+        basic_card.pack(fill="x", pady=(0, 8))
+
+        body = tk.Frame(basic_card, bg=COLORS["bg_card"])
+        body.pack(fill="x", padx=15, pady=10)
+
+        self.f_domain  = LabeledEntry(body, "Dominio *",     "ejemplo.local",       30)
+        self.f_docroot = LabeledEntry(body, "DocumentRoot *","/var/www/ejemplo",     30)
+        self.f_email   = LabeledEntry(body, "Admin Email",   "admin@ejemplo.local",  30)
+        self.f_port    = LabeledEntry(body, "Puerto",        "80",                   10)
+
+        for w in [self.f_domain, self.f_docroot, self.f_email, self.f_port]:
+            w.pack(fill="x", pady=3)
+
+        dir_row = tk.Frame(body, bg=COLORS["bg_card"])
+        dir_row.pack(fill="x", pady=2)
+        StyledButton(dir_row, "Seleccionar Directorio",
+                     command=self._browse_dir,
+                     style="ghost", icon="📁").pack(side="left")
+
+        tk.Frame(body, bg=COLORS["border"], height=1).pack(fill="x", pady=10)
+
+        btn_row = tk.Frame(body, bg=COLORS["bg_card"])
+        btn_row.pack(fill="x")
+        StyledButton(btn_row, "Crear VirtualHost",
+                     command=self._create_vhost,
+                     style="primary", icon="🚀").pack(side="left", padx=(0, 8))
+        StyledButton(btn_row, "Limpiar",
+                     command=self._clear_form,
+                     style="ghost", icon="🗑").pack(side="left")
+
+        info = tk.Frame(body, bg=COLORS["bg_panel"],
+                        highlightbackground=COLORS["info"], highlightthickness=1)
+        info.pack(fill="x", pady=(10, 0))
+        tk.Label(info, text="ℹ  El VirtualHost será habilitado automáticamente en Apache",
+                 font=FONTS["small"], bg=COLORS["bg_panel"],
+                 fg=COLORS["info_light"], justify="left").pack(
+            padx=10, pady=6, anchor="w")
+
+        # ── Sección: Autenticación Básica ──
+        auth_card = Card(parent, "🔑  AUTENTICACIÓN BÁSICA (HTTP AUTH)",
+                         accent_color=COLORS["warning"])
+        auth_card.pack(fill="x", pady=(0, 8))
+
+        ab = tk.Frame(auth_card, bg=COLORS["bg_card"])
+        ab.pack(fill="x", padx=15, pady=10)
+
+        # Selector de VHost a configurar
+        self.auth_domain_var = tk.StringVar()
+        vhost_row = tk.Frame(ab, bg=COLORS["bg_card"])
+        vhost_row.pack(fill="x", pady=3)
+        tk.Label(vhost_row, text="VirtualHost a configurar:",
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_secondary"]).pack(anchor="w")
+        self.auth_domain_combo = ttk.Combobox(
+            vhost_row, textvariable=self.auth_domain_var,
+            values=[], width=28, state="readonly", font=FONTS["body"])
+        self.auth_domain_combo.pack(side="left", pady=2)
+        self.auth_domain_combo.bind("<<ComboboxSelected>>",
+                                     lambda e: self._refresh_auth_users())
+        StyledButton(vhost_row, "↻", command=self._refresh_vhost_combo,
+                     style="ghost").pack(side="left", padx=4)
+
+        # Directorio a proteger
+        self.auth_dir = LabeledEntry(ab, "Directorio protegido (relativo al DocRoot):",
+                                      "/", 28)
+        self.auth_dir.pack(fill="x", pady=3)
+
+        # Botones de activar/desactivar auth
+        auth_toggle_row = tk.Frame(ab, bg=COLORS["bg_card"])
+        auth_toggle_row.pack(fill="x", pady=6)
+        StyledButton(auth_toggle_row, "✔ Activar Auth Básica",
+                     command=self._enable_basic_auth,
+                     style="success").pack(side="left", padx=(0, 6))
+        StyledButton(auth_toggle_row, "✖ Desactivar",
+                     command=self._disable_basic_auth,
+                     style="danger").pack(side="left", padx=(0, 6))
+        StyledButton(auth_toggle_row, "Estado",
+                     command=self._check_auth_status,
+                     style="ghost").pack(side="left")
+
+        # Estado rápido
+        self.auth_status_var = tk.StringVar(value="◉  Seleccione un VirtualHost")
+        tk.Label(ab, textvariable=self.auth_status_var,
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_muted"]).pack(anchor="w", pady=(4, 8))
+
+        tk.Frame(ab, bg=COLORS["border"], height=1).pack(fill="x", pady=4)
+
+        # ── Gestión de usuarios ──
+        tk.Label(ab, text="Gestión de Usuarios:",
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_secondary"]).pack(anchor="w", pady=(4, 2))
+
+        self.auth_user = LabeledEntry(ab, "Usuario:", "", 20)
+        self.auth_pass = LabeledEntry(ab, "Contraseña:", "", 20)
+        for w in [self.auth_user, self.auth_pass]:
+            w.pack(fill="x", pady=2)
+        # Ocultar contraseña
+        self.auth_pass.entry.config(show="●")
+
+        user_btns = tk.Frame(ab, bg=COLORS["bg_card"])
+        user_btns.pack(fill="x", pady=6)
+        StyledButton(user_btns, "➕ Agregar Usuario",
+                     command=self._add_user,
+                     style="success").pack(side="left", padx=(0, 4))
+        StyledButton(user_btns, "🗑 Eliminar Usuario",
+                     command=self._del_user,
+                     style="danger").pack(side="left")
+
+        # Lista de usuarios actuales
+        tk.Label(ab, text="Usuarios registrados:",
+                 font=FONTS["small"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_muted"]).pack(anchor="w", pady=(6, 2))
+
+        user_list_frame = tk.Frame(ab, bg=COLORS["bg_card"])
+        user_list_frame.pack(fill="x")
+
+        self.user_listbox = tk.Listbox(
+            user_list_frame, height=5, bg=COLORS["bg_input"],
+            fg=COLORS["text_primary"], font=FONTS["mono"],
+            selectbackground=COLORS["warning"],
+            selectforeground=COLORS["white"],
+            relief="flat", bd=0,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+        self.user_listbox.pack(side="left", fill="x", expand=True)
+        user_sb = ttk.Scrollbar(user_list_frame, orient="vertical",
+                                 command=self.user_listbox.yview)
+        self.user_listbox.configure(yscrollcommand=user_sb.set)
+        user_sb.pack(side="right", fill="y")
+        self.user_listbox.bind("<<ListboxSelect>>", self._on_user_select)
+
+        StyledButton(ab, "↻ Actualizar lista",
+                     command=self._refresh_auth_users,
+                     style="dark").pack(anchor="w", pady=4)
+
+        # Poblar combo al inicio
+        self._refresh_vhost_combo()
+
+    # ─── Helpers de VHost básico ─────────────────────────────
     def _style_tree(self):
         style = ttk.Style()
         style.theme_use("default")
@@ -368,8 +550,7 @@ class VHostTab(tk.Frame):
                          background=COLORS["bg_input"],
                          foreground=COLORS["text_primary"],
                          fieldbackground=COLORS["bg_input"],
-                         rowheight=26, font=FONTS["small"],
-                         borderwidth=0)
+                         rowheight=26, font=FONTS["small"], borderwidth=0)
         style.configure("Treeview.Heading",
                          background=COLORS["bg_panel"],
                          foreground=COLORS["accent"],
@@ -399,12 +580,9 @@ class VHostTab(tk.Frame):
         self.console.write(f"Creando VirtualHost: {domain}...", "info")
 
         def task():
-            args = ["create_vhost", domain, docroot]
-            if email and email != "admin@ejemplo.local":
-                args.append(email)
-            else:
-                args.append(f"webmaster@{domain}")
-            args.append(port)
+            args = ["create_vhost", domain, docroot,
+                    email if (email and email != "admin@ejemplo.local")
+                    else f"webmaster@{domain}", port]
             out, err, code = run_command_args(args)
             self.after(0, lambda: self._on_create(out, err, code))
 
@@ -414,6 +592,7 @@ class VHostTab(tk.Frame):
         self.console.write_output(out, err, code)
         if code == 0:
             self._refresh_list()
+            self._refresh_vhost_combo()
             messagebox.showinfo("Éxito", "VirtualHost creado exitosamente")
 
     def _refresh_list(self):
@@ -427,18 +606,46 @@ class VHostTab(tk.Frame):
         threading.Thread(target=task, daemon=True).start()
 
     def _populate_tree(self, output):
+        # También actualiza el combo de auth
+        domains = []
         for line in output.splitlines():
             if line.startswith("VHOST|"):
                 parts = line.split("|")
                 if len(parts) >= 6:
                     _, name, domain, docroot, port, status = parts[:6]
+                    domains.append(domain or name)
                     tag = "enabled" if status == "HABILITADO" else "disabled"
                     self.tree.insert("", "end",
-                                      values=(domain, docroot, port, status),
+                                      values=(domain, docroot, port, status, "…"),
                                       tags=(tag,))
-
         self.tree.tag_configure("enabled",  foreground=COLORS["success_light"])
         self.tree.tag_configure("disabled", foreground=COLORS["text_muted"])
+        # Actualizar combo
+        self.auth_domain_combo.config(values=domains)
+        self._refresh_auth_status_in_tree()
+
+    def _refresh_auth_status_in_tree(self):
+        """Consulta estado auth de cada vhost y actualiza columna Auth"""
+        items = self.tree.get_children()
+        if not items:
+            return
+
+        def task():
+            results = {}
+            for item in items:
+                domain = self.tree.item(item)["values"][0]
+                out, _, _ = run_command_args(["basic_auth", "status", str(domain)])
+                results[item] = "✔ Sí" if "AUTH: ACTIVA" in out else "No"
+            self.after(0, lambda: self._apply_auth_status(results))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _apply_auth_status(self, results):
+        for item, auth_val in results.items():
+            vals = list(self.tree.item(item)["values"])
+            if len(vals) >= 5:
+                vals[4] = auth_val
+                self.tree.item(item, values=vals)
 
     def _delete_vhost(self):
         sel = self.tree.selection()
@@ -451,10 +658,156 @@ class VHostTab(tk.Frame):
             out, err, code = run_command_args(["delete_vhost", domain])
             self.console.write_output(out, err, code)
             self._refresh_list()
+            self._refresh_vhost_combo()
+
+    def _load_auth_for_selected(self):
+        """Carga el dominio seleccionado en el panel de auth"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Aviso", "Seleccione un VirtualHost en la lista")
+            return
+        domain = str(self.tree.item(sel[0])["values"][0])
+        self.auth_domain_var.set(domain)
+        self._check_auth_status()
+        self._refresh_auth_users()
 
     def _clear_form(self):
         for f in [self.f_domain, self.f_docroot, self.f_email, self.f_port]:
             f.set("")
+
+    # ─── Helpers de Auth Básica ──────────────────────────────
+    def _get_auth_domain(self):
+        d = self.auth_domain_var.get().strip()
+        if not d:
+            messagebox.showwarning("Aviso", "Seleccione un VirtualHost")
+        return d
+
+    def _refresh_vhost_combo(self):
+        def task():
+            out, _, _ = run_command_args(["read_config", "virtualhosts"])
+            domains = []
+            for line in out.splitlines():
+                if line.startswith("VHOST|"):
+                    parts = line.split("|")
+                    if len(parts) >= 3:
+                        domains.append(parts[2] or parts[1])
+            self.after(0, lambda: self.auth_domain_combo.config(values=domains))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _enable_basic_auth(self):
+        domain = self._get_auth_domain()
+        if not domain:
+            return
+        auth_dir = self.auth_dir.get().strip() or "/"
+        self.console.write(f"Activando auth básica en {domain} ({auth_dir})...", "info")
+
+        def task():
+            out, err, code = run_command_args(
+                ["basic_auth", "add", domain, auth_dir])
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._check_auth_status(),
+                self._refresh_list()
+            ))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _disable_basic_auth(self):
+        domain = self._get_auth_domain()
+        if not domain:
+            return
+        if not messagebox.askyesno("Confirmar",
+                                    f"¿Desactivar autenticación básica en '{domain}'?"):
+            return
+        def task():
+            out, err, code = run_command_args(
+                ["basic_auth", "remove", domain])
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._check_auth_status(),
+                self._refresh_list()
+            ))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _check_auth_status(self):
+        domain = self._get_auth_domain()
+        if not domain:
+            return
+        def task():
+            out, _, _ = run_command_args(["basic_auth", "status", domain])
+            self.after(0, lambda: self._update_auth_indicator(out))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _update_auth_indicator(self, output):
+        if "AUTH: ACTIVA" in output:
+            self.auth_status_var.set("🔒  AUTH ACTIVA")
+            # parse extra info
+            lines = [l for l in output.splitlines()
+                     if l.startswith("AuthName") or l.startswith("USUARIOS")]
+            if lines:
+                self.auth_status_var.set("🔒  AUTH ACTIVA  —  " + "  |  ".join(lines))
+        elif "AUTH: INACTIVA" in output:
+            self.auth_status_var.set("🔓  AUTH INACTIVA")
+        else:
+            self.auth_status_var.set("◉  " + output.splitlines()[0] if output else "?")
+
+    def _add_user(self):
+        domain = self._get_auth_domain()
+        user   = self.auth_user.get().strip()
+        passwd = self.auth_pass.get().strip()
+        if not domain:
+            return
+        if not user or not passwd:
+            messagebox.showwarning("Validación", "Usuario y contraseña son requeridos")
+            return
+        def task():
+            out, err, code = run_command_args(
+                ["basic_auth", "add_user", domain, "", user, passwd])
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._refresh_auth_users()
+            ))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _del_user(self):
+        domain = self._get_auth_domain()
+        if not domain:
+            return
+        sel = self.user_listbox.curselection()
+        user = self.auth_user.get().strip()
+        if sel:
+            user = self.user_listbox.get(sel[0]).strip()
+        if not user:
+            messagebox.showwarning("Aviso", "Seleccione o escriba un usuario")
+            return
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar usuario '{user}'?"):
+            return
+        def task():
+            out, err, code = run_command_args(
+                ["basic_auth", "del_user", domain, "", user])
+            self.after(0, lambda: (
+                self.console.write_output(out, err, code),
+                self._refresh_auth_users()
+            ))
+        threading.Thread(target=task, daemon=True).start()
+
+    def _refresh_auth_users(self):
+        domain = self.auth_domain_var.get().strip()
+        if not domain:
+            return
+        self.user_listbox.delete(0, "end")
+        def task():
+            out, _, _ = run_command_args(["basic_auth", "list_users", domain])
+            users = [l.split("|")[1] for l in out.splitlines()
+                     if l.startswith("USER|")]
+            self.after(0, lambda: [self.user_listbox.insert("end", f"  {u}")
+                                    for u in users])
+            self.after(0, lambda: self._check_auth_status())
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_user_select(self, event):
+        sel = self.user_listbox.curselection()
+        if sel:
+            self.auth_user.set(self.user_listbox.get(sel[0]).strip())
 
 
 # ══════════════════════════════════════════════════════════════
@@ -527,8 +880,11 @@ class ConfigTab(tk.Frame):
             wrap="none", state="disabled"
         )
         self.output.pack(fill="both", expand=True, padx=5, pady=5)
-        self.output.tag_config("key",   foreground=COLORS["info_light"])
-        self.output.tag_config("value", foreground=COLORS["success_light"])
+        self.output.tag_config("key",     foreground=COLORS["info_light"])
+        self.output.tag_config("value",   foreground=COLORS["success_light"])
+        self.output.tag_config("warn",    foreground=COLORS["warning_light"])
+        self.output.tag_config("hdr_val", foreground=COLORS["accent"],
+                                font=("Courier New", 10, "bold"))
         self.output.tag_config("head",  foreground=COLORS["accent"],
                                 font=("Courier New", 11, "bold"))
         self.output.tag_config("dim",   foreground=COLORS["text_muted"])
@@ -555,6 +911,15 @@ class ConfigTab(tk.Frame):
         for line in out.splitlines():
             if line.startswith("==="):
                 self.output.insert("end", f"\n{line}\n", "head")
+            elif line.startswith("VERSION_HTTP:"):
+                # Colorear según si está oculta o expuesta
+                if "OCULTA" in line:
+                    self.output.insert("end", line + "\n", "value")
+                else:
+                    self.output.insert("end", line + "\n", "warn")
+            elif line.startswith("Server Header:"):
+                # Cabecera real devuelta por Apache
+                self.output.insert("end", line + "\n", "hdr_val")
             elif ":" in line and not line.startswith(" "):
                 k, _, v = line.partition(":")
                 self.output.insert("end", f"{k}:", "key")
@@ -623,7 +988,9 @@ class SecurityTab(tk.Frame):
         self._build()
 
     def _build(self):
-        container = tk.Frame(self, bg=COLORS["bg_dark"])
+        sf = ScrollableFrame(self)
+        sf.pack(fill="both", expand=True)
+        container = tk.Frame(sf.inner, bg=COLORS["bg_dark"])
         container.pack(fill="both", expand=True, padx=10, pady=10)
 
         # ── Columna izquierda: Versión ──
@@ -812,8 +1179,11 @@ class BackupTab(tk.Frame):
         self._build()
 
     def _build(self):
+        sf = ScrollableFrame(self)
+        sf.pack(fill="both", expand=True)
+
         # Top split: form + actions
-        top = tk.Frame(self, bg=COLORS["bg_dark"])
+        top = tk.Frame(sf.inner, bg=COLORS["bg_dark"])
         top.pack(fill="x", padx=10, pady=10)
 
         # ── Crear Backup ──
@@ -885,9 +1255,9 @@ class BackupTab(tk.Frame):
                      style="dark").pack(side="left", padx=3)
 
         # ── Lista de Backups ──
-        list_card = Card(self, "📋  BACKUPS DISPONIBLES",
+        list_card = Card(sf.inner, "📋  BACKUPS DISPONIBLES",
                          accent_color=COLORS["info"])
-        list_card.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        list_card.pack(fill="x", padx=10, pady=(0, 10))
 
         lb_toolbar = tk.Frame(list_card, bg=COLORS["bg_card"])
         lb_toolbar.pack(fill="x", padx=5, pady=5)
