@@ -464,10 +464,38 @@ class VHostTab(tk.Frame):
         StyledButton(vhost_row, "↻", command=self._refresh_vhost_combo,
                      style="ghost").pack(side="left", padx=4)
 
-        # Directorio a proteger
-        self.auth_dir = LabeledEntry(ab, "Directorio protegido (relativo al DocRoot):",
-                                      "/", 28)
-        self.auth_dir.pack(fill="x", pady=3)
+        # Directorio a proteger — con botón de ayuda
+        auth_dir_frame = tk.Frame(ab, bg=COLORS["bg_card"])
+        auth_dir_frame.pack(fill="x", pady=3)
+
+        dir_label_row = tk.Frame(auth_dir_frame, bg=COLORS["bg_card"])
+        dir_label_row.pack(fill="x")
+        tk.Label(dir_label_row, text="Directorio protegido (relativo al DocRoot):",
+                 font=FONTS["label"], bg=COLORS["bg_card"],
+                 fg=COLORS["text_secondary"]).pack(side="left")
+
+        help_btn = tk.Label(dir_label_row, text=" ❓ ",
+                            font=FONTS["small"], bg=COLORS["warning"],
+                            fg=COLORS["white"], cursor="hand2")
+        help_btn.pack(side="left", padx=4)
+        help_btn.bind("<Button-1>", lambda e: self._show_auth_dir_help())
+
+        self.auth_dir = LabeledEntry(auth_dir_frame, "",  "/", 28)
+        self.auth_dir.pack(fill="x")
+
+        # Caja informativa siempre visible
+        dir_info = tk.Frame(ab, bg="#1A1F2C",
+                            highlightbackground=COLORS["info"],
+                            highlightthickness=1)
+        dir_info.pack(fill="x", pady=(0, 6))
+        tk.Label(dir_info,
+                 text=("ℹ  Use  /  para proteger todo el sitio.\n"
+                       "   Use  /admin  para proteger solo esa subcarpeta.\n"
+                       "   Ejemplo: DocRoot=/var/www/mi-sitio  +  Dir=/privado\n"
+                       "   → protege  /var/www/mi-sitio/privado"),
+                 font=FONTS["small"], bg="#1A1F2C",
+                 fg=COLORS["info_light"], justify="left").pack(
+            padx=10, pady=6, anchor="w")
 
         # Botones de activar/desactivar auth
         auth_toggle_row = tk.Frame(ab, bg=COLORS["bg_card"])
@@ -760,8 +788,10 @@ class VHostTab(tk.Frame):
             messagebox.showwarning("Validación", "Usuario y contraseña son requeridos")
             return
         def task():
+            # Orden: basic_auth add_user <domain> <user> <password>
+            # En shell: $1=add_user $2=domain $3=user $4=password
             out, err, code = run_command_args(
-                ["basic_auth", "add_user", domain, "", user, passwd])
+                ["basic_auth", "add_user", domain, user, passwd])
             self.after(0, lambda: (
                 self.console.write_output(out, err, code),
                 self._refresh_auth_users()
@@ -777,13 +807,15 @@ class VHostTab(tk.Frame):
         if sel:
             user = self.user_listbox.get(sel[0]).strip()
         if not user:
-            messagebox.showwarning("Aviso", "Seleccione o escriba un usuario")
+            messagebox.showwarning("Aviso", "Seleccione un usuario de la lista o escríbalo")
             return
         if not messagebox.askyesno("Confirmar", f"¿Eliminar usuario '{user}'?"):
             return
         def task():
+            # Orden: basic_auth del_user <domain> <user>
+            # En shell: $1=del_user $2=domain $3=user
             out, err, code = run_command_args(
-                ["basic_auth", "del_user", domain, "", user])
+                ["basic_auth", "del_user", domain, user])
             self.after(0, lambda: (
                 self.console.write_output(out, err, code),
                 self._refresh_auth_users()
@@ -808,6 +840,48 @@ class VHostTab(tk.Frame):
         sel = self.user_listbox.curselection()
         if sel:
             self.auth_user.set(self.user_listbox.get(sel[0]).strip())
+
+    def _show_auth_dir_help(self):
+        msg = (
+            "📁  CAMPO: Directorio Protegido\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Este campo indica qué carpeta dentro del VirtualHost\n"
+            "quedará protegida con usuario y contraseña.\n\n"
+            "El valor es RELATIVO al DocumentRoot del VirtualHost.\n\n"
+            "EJEMPLOS:\n\n"
+            "  /   → Protege TODO el sitio web\n"
+            "        (el usuario verá login al entrar a cualquier página)\n\n"
+            "  /admin   → Solo protege la carpeta 'admin'\n"
+            "             El resto del sitio sigue siendo público\n\n"
+            "  /privado → Solo protege la carpeta 'privado'\n\n"
+            "FLUJO RECOMENDADO:\n\n"
+            "  1. Seleccione el VirtualHost en el combo\n"
+            "  2. Escriba el directorio (o deje / para todo)\n"
+            "  3. Haga clic en '✔ Activar Auth Básica'\n"
+            "  4. Agregue al menos un usuario con ➕\n"
+            "  5. Pruebe en el navegador — debería pedir login\n\n"
+            "NOTA: Si la carpeta no existe, Apache la ignorará.\n"
+            "Asegúrese de que el directorio exista en el servidor."
+        )
+        win = tk.Toplevel(self)
+        win.title("Ayuda — Directorio Protegido")
+        win.geometry("500x420")
+        win.configure(bg=COLORS["bg_card"])
+        win.resizable(False, False)
+
+        tk.Label(win, text="  📁  Ayuda: Directorio Protegido",
+                 font=FONTS["subhead"], bg=COLORS["bg_panel"],
+                 fg=COLORS["accent"]).pack(fill="x", ipady=8)
+
+        txt = tk.Text(win, bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+                      font=FONTS["small"], relief="flat", bd=0,
+                      wrap="word", padx=15, pady=10, state="normal")
+        txt.insert("1.0", msg)
+        txt.config(state="disabled")
+        txt.pack(fill="both", expand=True, padx=5, pady=5)
+
+        StyledButton(win, "Entendido", command=win.destroy,
+                     style="primary").pack(pady=(0, 10))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -908,18 +982,31 @@ class ConfigTab(tk.Frame):
         self.output.config(state="normal")
         self.output.delete("1.0", "end")
 
-        for line in out.splitlines():
+        for raw_line in out.splitlines():
+            line = raw_line.strip("\r")   # eliminar \r de respuestas HTTP
             if line.startswith("==="):
                 self.output.insert("end", f"\n{line}\n", "head")
             elif line.startswith("VERSION_HTTP:"):
-                # Colorear según si está oculta o expuesta
                 if "OCULTA" in line:
                     self.output.insert("end", line + "\n", "value")
                 else:
                     self.output.insert("end", line + "\n", "warn")
             elif line.startswith("Server Header:"):
-                # Cabecera real devuelta por Apache
-                self.output.insert("end", line + "\n", "hdr_val")
+                # Extraer solo el valor después de los dos puntos
+                val = line.split(":", 1)[1].strip() if ":" in line else line
+                self.output.insert("end", "Server Header: ", "key")
+                if val:
+                    self.output.insert("end", val + "\n", "hdr_val")
+                else:
+                    self.output.insert("end", "(vacío)\n", "dim")
+            elif line.startswith("Respuesta HTTP:"):
+                val = line.split(":", 1)[1].strip() if ":" in line else line
+                self.output.insert("end", "Respuesta HTTP: ", "key")
+                self.output.insert("end", val + "\n", "value")
+            elif line.startswith("Puerto detectado:"):
+                val = line.split(":", 1)[1].strip() if ":" in line else line
+                self.output.insert("end", "Puerto detectado: ", "key")
+                self.output.insert("end", val + "\n", "value")
             elif ":" in line and not line.startswith(" "):
                 k, _, v = line.partition(":")
                 self.output.insert("end", f"{k}:", "key")

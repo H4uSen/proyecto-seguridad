@@ -141,7 +141,6 @@ read_config() {
             echo "UPTIME: $(systemctl show apache2 --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)"
             echo ""
             echo "=== CONFIGURACIÓN DE VERSIÓN HTTP ==="
-            # Leer ServerTokens real (prioridad: security.conf > apache2.conf > default)
             local _tokens=""
             local _sig=""
             local _tokens_src="(default del sistema)"
@@ -165,22 +164,35 @@ read_config() {
             echo "ServerTokens: $_tokens  [$_tokens_src]"
             echo "ServerSignature: $_sig  [$_sig_src]"
             if [ "$_tokens" = "Prod" ]; then
-                echo "VERSION_HTTP: OCULTA  (solo 'Apache' en cabeceras)"
+                echo "VERSION_HTTP: OCULTA  (cabecera mostrará solo 'Apache')"
             else
                 echo "VERSION_HTTP: EXPUESTA  (modo: $_tokens)"
             fi
             echo ""
             echo "=== CABECERA HTTP REAL ==="
-            # Consultar cabecera Server real si curl está disponible
+            # Detectar puerto en escucha
+            local _port=""
+            _port=$(ss -tlnp 2>/dev/null | grep -E 'apache2|httpd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -1)
+            [ -z "$_port" ] && _port=$(netstat -tlnp 2>/dev/null | grep -E 'apache2|httpd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -1)
+            [ -z "$_port" ] && _port="80"
+            echo "Puerto detectado: $_port"
             if command -v curl &>/dev/null; then
-                local _server_hdr=$(curl -sI --max-time 3 http://localhost/ 2>/dev/null | grep -i "^Server:" | tr -d '\r')
-                if [ -n "$_server_hdr" ]; then
-                    echo "Server Header: $_server_hdr"
+                local _raw_header
+                _raw_header=$(curl -si --max-time 4 "http://127.0.0.1:$_port/" 2>/dev/null | head -20)
+                local _server=$(echo "$_raw_header" | grep -i "^Server:" | tr -d '\r\n' | sed 's/Server: *//')
+                local _status_line=$(echo "$_raw_header" | head -1 | tr -d '\r\n')
+                if [ -n "$_status_line" ]; then
+                    echo "Respuesta HTTP: $_status_line"
+                    if [ -n "$_server" ]; then
+                        echo "Server Header: $_server"
+                    else
+                        echo "Server Header: (no presente en respuesta)"
+                    fi
                 else
-                    echo "Server Header: (sin respuesta de localhost)"
+                    echo "Server Header: (sin respuesta — Apache puede no escuchar en 127.0.0.1:$_port)"
                 fi
             else
-                echo "Server Header: (instale curl para verificar)"
+                echo "Server Header: (instale curl: apt-get install curl)"
             fi
             ;;
         "virtualhosts")
@@ -672,23 +684,36 @@ PYEOF
             ;;
 
         "add_user")
-            if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            # Argumentos: add_user <domain> <username> <password>
+            # $1=ACTION $2=DOMAIN → aquí ya estamos dentro del case
+            # USERNAME y PASSWORD vienen de $3 y $4 cuando se llama como:
+            #   manage_basic_auth add_user <domain> <user> <pass>
+            # Pero la función los recibe como $4 y $5 desde el dispatcher
+            # Reasignamos localmente para claridad:
+            local _USER="$3"
+            local _PASS="$4"
+            # Si vinieron en posición $4/$5 (llamada con AUTH_DIR vacío), usar esos
+            [ -z "$_USER" ] && _USER="$USERNAME"
+            [ -z "$_PASS" ] && _PASS="$PASSWORD"
+
+            if [ -z "$_USER" ] || [ -z "$_PASS" ]; then
                 echo "ERROR: Usuario y contraseña son requeridos"
+                echo "DEBUG: USER='$_USER' PASS_LEN=${#_PASS}"
                 exit 1
             fi
             mkdir -p "$HTPASSWD_DIR"
 
             if [ ! -f "$HTPASSWD_FILE" ]; then
-                htpasswd -cb "$HTPASSWD_FILE" "$USERNAME" "$PASSWORD" 2>/dev/null
+                htpasswd -cb "$HTPASSWD_FILE" "$_USER" "$_PASS"
             else
-                htpasswd -b "$HTPASSWD_FILE" "$USERNAME" "$PASSWORD" 2>/dev/null
+                htpasswd -b "$HTPASSWD_FILE" "$_USER" "$_PASS"
             fi
 
             if [ $? -eq 0 ]; then
                 chown root:www-data "$HTPASSWD_FILE"
                 chmod 640 "$HTPASSWD_FILE"
-                log_action "Usuario '$USERNAME' agregado a $DOMAIN"
-                echo "SUCCESS: Usuario '$USERNAME' agregado en $DOMAIN"
+                log_action "Usuario '$_USER' agregado a $DOMAIN"
+                echo "SUCCESS: Usuario '$_USER' agregado en $DOMAIN"
                 echo "HTPASSWD: $HTPASSWD_FILE"
             else
                 echo "ERROR: Fallo al agregar usuario"
@@ -697,7 +722,11 @@ PYEOF
             ;;
 
         "del_user")
-            if [ -z "$USERNAME" ]; then
+            # Argumentos: del_user <domain> <username>
+            local _USER="$3"
+            [ -z "$_USER" ] && _USER="$USERNAME"
+
+            if [ -z "$_USER" ]; then
                 echo "ERROR: Usuario requerido"
                 exit 1
             fi
@@ -705,12 +734,12 @@ PYEOF
                 echo "ERROR: No existe archivo htpasswd para $DOMAIN"
                 exit 1
             fi
-            htpasswd -D "$HTPASSWD_FILE" "$USERNAME" 2>/dev/null
+            htpasswd -D "$HTPASSWD_FILE" "$_USER"
             if [ $? -eq 0 ]; then
-                log_action "Usuario '$USERNAME' eliminado de $DOMAIN"
-                echo "SUCCESS: Usuario '$USERNAME' eliminado"
+                log_action "Usuario '$_USER' eliminado de $DOMAIN"
+                echo "SUCCESS: Usuario '$_USER' eliminado"
             else
-                echo "ERROR: No se pudo eliminar el usuario (¿existe?)"
+                echo "ERROR: No se pudo eliminar el usuario '$_USER' (¿existe?)"
                 exit 1
             fi
             ;;
@@ -720,7 +749,7 @@ PYEOF
             echo "ARCHIVO: $HTPASSWD_FILE"
             if [ -f "$HTPASSWD_FILE" ]; then
                 local COUNT=0
-                while IFS=: read -r user _; do
+                while IFS=: read -r user _rest; do
                     [ -n "$user" ] && echo "USER|$user" && COUNT=$((COUNT+1))
                 done < "$HTPASSWD_FILE"
                 echo "TOTAL: $COUNT usuario(s)"
