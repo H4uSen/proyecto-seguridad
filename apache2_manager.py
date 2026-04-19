@@ -891,6 +891,7 @@ class ConfigTab(tk.Frame):
     def __init__(self, parent, console):
         super().__init__(parent, bg=COLORS["bg_dark"])
         self.console = console
+        self._current_section = "status"
         self._build()
 
     def _build(self):
@@ -967,6 +968,7 @@ class ConfigTab(tk.Frame):
         self._update_status()
 
     def _load_section(self, section):
+        self._current_section = section
         self.output.config(state="normal")
         self.output.delete("1.0", "end")
         self.output.insert("end", f"Cargando {section}...\n", "dim")
@@ -1027,12 +1029,14 @@ class ConfigTab(tk.Frame):
 
     def _apache_control(self, action):
         self.console.write(f"Apache2 → {action.upper()}...", "info")
+        refresh_actions = {"start", "stop", "restart", "reload"}
 
         def task():
             out, err, code = run_command_args(["apache_control", action])
             self.after(0, lambda: (
                 self.console.write_output(out, err, code),
-                self._update_status()
+                self._update_status(),
+                self._load_section(self._current_section) if action in refresh_actions else None
             ))
 
         threading.Thread(target=task, daemon=True).start()
