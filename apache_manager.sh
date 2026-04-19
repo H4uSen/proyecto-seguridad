@@ -43,6 +43,65 @@ set_or_add_directive() {
     fi
 }
 
+probe_server_header() {
+    # Devuelve: URL|STATUS_LINE|SERVER_HEADER
+    # Prioriza respuestas válidas (evita falso positivo de HTTP en puerto TLS).
+    local urls=()
+    local seen="|"
+
+    _add_url() {
+        local u="$1"
+        [[ "$seen" == *"|$u|"* ]] && return
+        seen+="$u|"
+        urls+=("$u")
+    }
+
+    _add_url "http://127.0.0.1/"
+    _add_url "https://127.0.0.1/"
+
+    local port
+    while IFS= read -r port; do
+        [ -z "$port" ] && continue
+        if [ "$port" = "443" ] || [ "$port" = "8443" ]; then
+            _add_url "https://127.0.0.1:$port/"
+        elif [ "$port" = "80" ] || [ "$port" = "8080" ]; then
+            _add_url "http://127.0.0.1:$port/"
+        else
+            _add_url "http://127.0.0.1:$port/"
+            _add_url "https://127.0.0.1:$port/"
+        fi
+    done < <(ss -tln 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u)
+
+    local first_with_header=""
+    local url raw status server
+    for url in "${urls[@]}"; do
+        if [[ "$url" == https://* ]]; then
+            raw=$(curl -k -si --max-time 4 "$url" 2>/dev/null | head -20)
+        else
+            raw=$(curl -si --max-time 4 "$url" 2>/dev/null | head -20)
+        fi
+
+        status=$(echo "$raw" | head -1 | tr -d '\r')
+        server=$(echo "$raw" | awk -F': ' 'BEGIN{IGNORECASE=1} /^Server:/{print $2; exit}' | tr -d '\r')
+
+        [ -z "$status" ] && continue
+        [ -n "$server" ] && [ -z "$first_with_header" ] && first_with_header="$url|$status|$server"
+
+        # Evita tomar como fuente principal un 400 típico de esquema incorrecto.
+        if echo "$status" | grep -q " 400 "; then
+            continue
+        fi
+
+        if [ -n "$server" ]; then
+            echo "$url|$status|$server"
+            return 0
+        fi
+    done
+
+    [ -n "$first_with_header" ] && echo "$first_with_header" && return 0
+    return 1
+}
+
 # ============================================================
 # FUNCIÓN: Crear Virtual Host
 # ============================================================
@@ -184,26 +243,18 @@ read_config() {
             fi
             echo ""
             echo "=== CABECERA HTTP REAL ==="
-            # Detectar puerto en escucha
-            local _port=""
-            _port=$(ss -tlnp 2>/dev/null | grep -E 'apache2|httpd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -1)
-            [ -z "$_port" ] && _port=$(netstat -tlnp 2>/dev/null | grep -E 'apache2|httpd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -1)
-            [ -z "$_port" ] && _port="80"
-            echo "Puerto detectado: $_port"
             if command -v curl &>/dev/null; then
-                local _raw_header
-                _raw_header=$(curl -si --max-time 4 "http://127.0.0.1:$_port/" 2>/dev/null | head -20)
-                local _server=$(echo "$_raw_header" | grep -i "^Server:" | tr -d '\r\n' | sed 's/Server: *//')
-                local _status_line=$(echo "$_raw_header" | head -1 | tr -d '\r\n')
-                if [ -n "$_status_line" ]; then
+                local _probe _url _status_line _server
+                _probe=$(probe_server_header)
+                if [ -n "$_probe" ]; then
+                    _url=$(echo "$_probe" | cut -d'|' -f1)
+                    _status_line=$(echo "$_probe" | cut -d'|' -f2)
+                    _server=$(echo "$_probe" | cut -d'|' -f3-)
+                    echo "URL probada: $_url"
                     echo "Respuesta HTTP: $_status_line"
-                    if [ -n "$_server" ]; then
-                        echo "Server Header: $_server"
-                    else
-                        echo "Server Header: (no presente en respuesta)"
-                    fi
+                    echo "Server Header: ${_server:-'(no presente en respuesta)'}"
                 else
-                    echo "Server Header: (sin respuesta — Apache puede no escuchar en 127.0.0.1:$_port)"
+                    echo "Server Header: (sin respuesta usable en localhost)"
                 fi
             else
                 echo "Server Header: (instale curl: apt-get install curl)"
@@ -312,9 +363,16 @@ EOF
             echo "ServerSignature (apache2.conf): ${sig_ap:-N/A}"
 
             local server_hdr=""
+            local server_url=""
             if command -v curl &>/dev/null; then
-                server_hdr=$(curl -si --max-time 4 "http://127.0.0.1/" 2>/dev/null | awk -F': ' 'BEGIN{IGNORECASE=1} /^Server:/{print $2; exit}' | tr -d '\r')
+                local _probe
+                _probe=$(probe_server_header)
+                if [ -n "$_probe" ]; then
+                    server_url=$(echo "$_probe" | cut -d'|' -f1)
+                    server_hdr=$(echo "$_probe" | cut -d'|' -f3-)
+                fi
             fi
+            [ -n "$server_url" ] && echo "URL probada: $server_url"
             echo "Server Header: ${server_hdr:-N/A}"
 
             if [ -n "$server_hdr" ] && ! echo "$server_hdr" | grep -q '/'; then
