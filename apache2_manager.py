@@ -1645,8 +1645,11 @@ class CronRsyncTab(tk.Frame):
         self._build()
 
     def _build(self):
-        # ── Layout: izquierda=formularios, derecha=jobs
-        main = tk.Frame(self, bg=COLORS["bg_dark"])
+        # ── Layout scrolleable: evita pérdida de contenido al redimensionar
+        sf = ScrollableFrame(self, bg=COLORS["bg_dark"])
+        sf.pack(fill="both", expand=True)
+
+        main = tk.Frame(sf.inner, bg=COLORS["bg_dark"])
         main.pack(fill="both", expand=True, padx=10, pady=10)
 
         left = tk.Frame(main, bg=COLORS["bg_dark"])
@@ -1910,6 +1913,10 @@ class CronRsyncTab(tk.Frame):
         self.log_text.tag_config("ok",  foreground=COLORS["success_light"])
         self.log_text.tag_config("err", foreground=COLORS["danger_light"])
         self.log_text.tag_config("hdr", foreground=COLORS["accent"])
+
+        # Permite scroll con rueda cuando el cursor está sobre widgets internos
+        for w in (main, left, right, self.jtree, self.log_text):
+            sf.bind_scroll_to(w)
 
         self._refresh_jobs()
 
