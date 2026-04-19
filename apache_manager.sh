@@ -29,6 +29,20 @@ check_root() {
     fi
 }
 
+set_or_add_directive() {
+    local file="$1"
+    local directive="$2"
+    local value="$3"
+
+    [ -f "$file" ] || touch "$file"
+
+    if grep -Eq "^[[:space:]]*${directive}[[:space:]]+" "$file"; then
+        sed -Ei "s|^[[:space:]]*${directive}[[:space:]]+.*|${directive} ${value}|" "$file"
+    else
+        printf "\n%s %s\n" "$directive" "$value" >> "$file"
+    fi
+}
+
 # ============================================================
 # FUNCIÓN: Crear Virtual Host
 # ============================================================
@@ -259,33 +273,51 @@ EOF
 
     case "$ACTION" in
         "hide")
-            sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$SECURITY_CONF"
-            sed -i 's/^ServerSignature.*/ServerSignature Off/' "$SECURITY_CONF"
-            # También en apache2.conf
-            if grep -q "ServerTokens" "$APACHE_CONF/apache2.conf" 2>/dev/null; then
-                sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$APACHE_CONF/apache2.conf"
-            else
-                echo "ServerTokens Prod" >> "$APACHE_CONF/apache2.conf"
-            fi
+            set_or_add_directive "$SECURITY_CONF" "ServerTokens" "Prod"
+            set_or_add_directive "$SECURITY_CONF" "ServerSignature" "Off"
+            set_or_add_directive "$APACHE_CONF/apache2.conf" "ServerTokens" "Prod"
+            set_or_add_directive "$APACHE_CONF/apache2.conf" "ServerSignature" "Off"
             a2enconf security > /dev/null 2>&1
+            if ! apache2ctl configtest > /dev/null 2>&1; then
+                echo "ERROR: Configuración inválida al ocultar versión"
+                exit 1
+            fi
             systemctl reload apache2 > /dev/null 2>&1
             log_action "Versión de Apache OCULTADA"
             echo "SUCCESS: Versión de Apache ocultada (ServerTokens Prod, ServerSignature Off)"
             ;;
         "show")
-            sed -i 's/^ServerTokens.*/ServerTokens Full/' "$SECURITY_CONF"
-            sed -i 's/^ServerSignature.*/ServerSignature On/' "$SECURITY_CONF"
+            set_or_add_directive "$SECURITY_CONF" "ServerTokens" "Full"
+            set_or_add_directive "$SECURITY_CONF" "ServerSignature" "On"
+            set_or_add_directive "$APACHE_CONF/apache2.conf" "ServerTokens" "Full"
+            set_or_add_directive "$APACHE_CONF/apache2.conf" "ServerSignature" "On"
             a2enconf security > /dev/null 2>&1
+            if ! apache2ctl configtest > /dev/null 2>&1; then
+                echo "ERROR: Configuración inválida al mostrar versión"
+                exit 1
+            fi
             systemctl reload apache2 > /dev/null 2>&1
             log_action "Versión de Apache MOSTRADA"
             echo "SUCCESS: Versión de Apache visible (ServerTokens Full, ServerSignature On)"
             ;;
         "status")
-            local tokens=$(grep "^ServerTokens" "$SECURITY_CONF" 2>/dev/null | awk '{print $2}')
-            local sig=$(grep "^ServerSignature" "$SECURITY_CONF" 2>/dev/null | awk '{print $2}')
-            echo "ServerTokens: ${tokens:-OS (default)}"
-            echo "ServerSignature: ${sig:-On (default)}"
-            if [ "$tokens" = "Prod" ]; then
+            local tokens=$(grep -E "^[[:space:]]*ServerTokens[[:space:]]+" "$SECURITY_CONF" 2>/dev/null | tail -1 | awk '{print $2}')
+            local sig=$(grep -E "^[[:space:]]*ServerSignature[[:space:]]+" "$SECURITY_CONF" 2>/dev/null | tail -1 | awk '{print $2}')
+            local tokens_ap=$(grep -E "^[[:space:]]*ServerTokens[[:space:]]+" "$APACHE_CONF/apache2.conf" 2>/dev/null | tail -1 | awk '{print $2}')
+            local sig_ap=$(grep -E "^[[:space:]]*ServerSignature[[:space:]]+" "$APACHE_CONF/apache2.conf" 2>/dev/null | tail -1 | awk '{print $2}')
+
+            echo "ServerTokens (security.conf): ${tokens:-N/A}"
+            echo "ServerSignature (security.conf): ${sig:-N/A}"
+            echo "ServerTokens (apache2.conf): ${tokens_ap:-N/A}"
+            echo "ServerSignature (apache2.conf): ${sig_ap:-N/A}"
+
+            local server_hdr=""
+            if command -v curl &>/dev/null; then
+                server_hdr=$(curl -si --max-time 4 "http://127.0.0.1/" 2>/dev/null | awk -F': ' 'BEGIN{IGNORECASE=1} /^Server:/{print $2; exit}' | tr -d '\r')
+            fi
+            echo "Server Header: ${server_hdr:-N/A}"
+
+            if [ -n "$server_hdr" ] && ! echo "$server_hdr" | grep -q '/'; then
                 echo "ESTADO: OCULTA"
             else
                 echo "ESTADO: VISIBLE"
